@@ -1,0 +1,101 @@
+{
+  "lessonId": 10,
+  "questions": [
+    {
+      "id": 1,
+      "question": "When do Type Scripts run compared to Lock Scripts?",
+      "options": [
+        "Type scripts run only for input cells; lock scripts run only for output cells",
+        "Type scripts run for both input AND output cells; lock scripts run only for input cells",
+        "Both type scripts and lock scripts run only for input cells",
+        "Type scripts run before lock scripts, but both only run for output cells"
+      ],
+      "correctAnswer": 1,
+      "explanation": "This is the critical distinction between the two script types. Lock scripts run exclusively when a cell is consumed as a transaction input — they answer 'does this person have permission to spend this cell?'. Type scripts run for every cell that references them, whether the cell is an input being consumed or an output being created. This dual execution lets type scripts enforce rules about how state transitions between old and new cells."
+    },
+    {
+      "id": 2,
+      "question": "What is the counter pattern for state management on CKB?",
+      "options": [
+        "A single global counter cell that all users share and increment cooperatively",
+        "A cell whose data stores a u64 value that starts at 0 on creation and can only increase by exactly 1 per transaction",
+        "A counter that tracks how many times a lock script has been executed",
+        "A type script that counts the number of cells in a transaction"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The counter demonstrates CKB's state machine pattern. Each counter is a cell whose data field holds an 8-byte little-endian u64. The type script enforces three rules: on creation the value must be 0, on update the output value must equal the input value plus exactly 1, and on destruction (no outputs) the operation is unconditionally allowed. This creates a monotonically increasing sequence that no one can skip, decrement, or forge."
+    },
+    {
+      "id": 3,
+      "question": "How does a type script distinguish a 'create' operation from an 'update' operation?",
+      "options": [
+        "By reading a special flag byte at the beginning of the cell data",
+        "By checking a field in the transaction's witnesses",
+        "By counting group inputs and outputs: 0 group inputs = creation, 1+ group inputs with 1+ group outputs = update",
+        "By comparing the lock script before and after the operation"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Type scripts identify the operation type by examining how many cells are in their script group. If there are zero group inputs and one or more group outputs, new cells are being minted — this is creation. If there are one or more group inputs AND one or more group outputs, existing cells are being replaced — this is an update. If there are one or more group inputs and zero group outputs, cells are being permanently removed — this is destruction. The counter script uses Source::GroupInput and Source::GroupOutput with index iteration to count each case."
+    },
+    {
+      "id": 4,
+      "question": "What happens when cells with a type script are destroyed (consumed with no outputs carrying that type script)?",
+      "options": [
+        "The type script is executed and must explicitly approve the destruction",
+        "The destruction is always rejected — type scripts cannot be removed once attached",
+        "The type script runs and in the counter implementation unconditionally returns success",
+        "The type script does not run at all for destroyed cells"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The counter type script does run when cells are destroyed — type scripts always run for input cells that reference them. The counter implementation matches on the (input_count > 0, output_count == 0) case and immediately returns Ok(()). This allows the owner to reclaim their CKB capacity by destroying the counter cell. A different type script could enforce conditions on destruction (for example, a token script might require a burn record), but the counter allows it freely."
+    },
+    {
+      "id": 5,
+      "question": "Which syscall is used to read cell data inside a Rust CKB script?",
+      "options": [
+        "ckb_load_cell_output(index, source)",
+        "ckb_load_witness(index, source)",
+        "load_cell_data(index, source) from ckb_std::high_level",
+        "ckb_read_data(cell_index)"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The load_cell_data(index, source) function from ckb_std::high_level is the primary way to read cell data in type scripts. It takes an index (0-based within the source group) and a Source enum variant. Using Source::GroupInput reads data from the cells in the current script group that are inputs, and Source::GroupOutput reads from group outputs. It returns a Vec<u8> on success or a SysError on failure, with SysError::IndexOutOfBound signaling that there are no more cells at that index."
+    },
+    {
+      "id": 6,
+      "question": "How does the counter type script enforce monotonic increments?",
+      "options": [
+        "It stores the previous value in a separate witness field and compares them",
+        "It reads input data and output data, parses both as little-endian u64, and rejects the transaction unless output equals input plus exactly 1",
+        "It uses a blockchain timestamp to verify that the value only ever increases",
+        "It relies on the lock script to enforce incrementing by signing a specific increment amount"
+      ],
+      "correctAnswer": 1,
+      "explanation": "In the update case, the counter script calls load_cell_data(0, Source::GroupInput) and load_cell_data(0, Source::GroupOutput) to read the data from the input and output cells. It passes both through parse_counter(), which checks the data is exactly 8 bytes and converts them to u64 using u64::from_le_bytes(). Finally it checks if output_counter != input_counter + 1 and returns ERROR_COUNTER_NOT_INCREMENTED if the condition is violated. This check runs at the consensus layer, making it impossible for any transaction to increment by 2, skip values, or decrement."
+    },
+    {
+      "id": 7,
+      "question": "What is a 'script group' in the context of type scripts?",
+      "options": [
+        "A collection of different type scripts that are bundled together and execute sequentially",
+        "All cells in a transaction that share the exact same type script (same code_hash, hash_type, and args), validated together in a single script execution",
+        "A group of developers who wrote a shared type script library",
+        "The set of cell dependencies that a type script loads its code from"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB groups cells by their complete script identity — the combination of code_hash, hash_type, and args must all match for cells to belong to the same group. When executing a type script, Source::GroupInput and Source::GroupOutput filter cells to only those in the current group. This means the type script sees all related cells at once and validates the entire state transition holistically. Importantly, two cells with the same code_hash but different args are in different groups and validated independently — this allows parameterizing behavior via args while still using shared code."
+    },
+    {
+      "id": 8,
+      "question": "What makes type scripts useful for token standards like xUDT?",
+      "options": [
+        "Type scripts can read the user's private key to authorize token minting",
+        "Type scripts run for both inputs and outputs, allowing them to enforce conservation: the total tokens consumed must equal (or exceed) the total tokens created",
+        "Type scripts can connect to external price oracles to determine token values",
+        "Type scripts automatically freeze tokens that are transferred to invalid addresses"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Token standards like xUDT (extensible User Defined Token) rely on type scripts executing for both input cells (tokens being consumed) and output cells (tokens being created). The type script sums the token amounts in all group inputs and all group outputs. If output total exceeds input total, new tokens are being created (minting), which requires special authorization. If output total equals input total, this is a normal transfer. If output total is less, tokens are being burned. Because this check runs at consensus level for every transaction, inflation is cryptographically impossible without the minting key — this is the fundamental security guarantee of CKB token standards."
+    }
+  ]
+}

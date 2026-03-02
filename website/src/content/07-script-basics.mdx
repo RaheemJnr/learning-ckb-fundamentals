@@ -1,0 +1,389 @@
+# Lock Scripts & Type Scripts
+
+## Overview
+
+In this lesson, you will explore CKB's script system -- the mechanism that makes every cell programmable and every transaction verifiable. Scripts are the heart of CKB's smart contract model, but they work very differently from Ethereum's smart contracts. Understanding scripts is essential for building any non-trivial application on Nervos.
+
+By the end of this lesson, you will be able to:
+
+- Explain how CKB scripts validate transactions (and why they never execute state changes)
+- Distinguish between lock scripts (authorization) and type scripts (state validation)
+- Read and interpret the three fields of a script: code_hash, hash_type, and args
+- Choose the correct hash_type for your use case
+- Understand how script groups optimize transaction verification
+- Explain how cell deps connect scripts to their on-chain code
+
+## Prerequisites
+
+- Completion of Lessons 1-6 (Cell Model, Transactions, Cell Queries)
+- Node.js 18+ installed on your machine
+- Familiarity with TypeScript and async/await patterns
+
+## Concepts
+
+### The Script Execution Model: Validators, Not Executors
+
+The most important thing to understand about CKB scripts is that they are **validators**, not executors. This is a fundamental departure from Ethereum's model and it shapes everything about how CKB applications are built.
+
+**Ethereum's model (executor):** A smart contract receives a function call, executes logic, and modifies its own state. The contract is in charge of what happens.
+
+**CKB's model (validator):** A transaction proposes a complete state transition -- it specifies exactly which cells to consume (inputs) and which new cells to create (outputs). Scripts then inspect this proposed transition and return either success (0) or failure (non-zero). Scripts never modify state. They only say "yes, this is valid" or "no, reject this."
+
+Think of it like this: in Ethereum, a smart contract is like a bank teller who processes your deposit and updates the ledger. In CKB, scripts are like an auditor who reviews a completed transaction and stamps it "approved" or "rejected." The auditor never moves money -- they only verify that the books are correct.
+
+This validator model has profound implications:
+
+- **Determinism**: The same transaction always produces the same result, regardless of when or where it is verified
+- **Parallelism**: Scripts that operate on different cell groups can run simultaneously
+- **Off-chain computation**: Complex logic can run off-chain; the on-chain script only needs to verify the result
+- **Composability**: Multiple scripts can validate different aspects of the same transaction independently
+
+### Lock Script Deep Dive: Ownership and Authorization
+
+Every cell in CKB must have a lock script. The lock script answers one question: **"Who is allowed to spend this cell?"**
+
+When someone tries to consume a cell as a transaction input, CKB runs that cell's lock script. If the script returns 0 (success), the spending is authorized. If it returns anything else, the transaction is rejected.
+
+**Execution timing:** Lock scripts run **only on input cells**. They are never executed for output cells. This makes sense -- you need to prove you have permission to spend existing cells, but creating new cells does not require the new lock script's permission (that would create a chicken-and-egg problem).
+
+The most common lock script is **SECP256K1-BLAKE160**, which works like Bitcoin's P2PKH:
+
+1. The `args` field stores a 20-byte blake160 hash of the owner's secp256k1 public key
+2. To spend the cell, the owner signs the transaction hash with their private key
+3. The lock script verifies the signature against the pubkey hash in `args`
+4. If the signature is valid, the script returns 0 (success)
+
+```typescript
+// A lock script looks like this:
+{
+  code_hash: "0x9bd7e06f...",  // Identifies the SECP256K1-BLAKE160 program
+  hash_type: "type",           // How to find the program (see hash_type section)
+  args: "0x4b1c..."            // 20-byte blake160(public_key) of the owner
+}
+```
+
+Anyone can create a cell with any lock script. The lock script only matters when someone tries to spend the cell. This is why you can receive CKB from anyone without any prior setup -- they just create a cell with your lock script.
+
+### Type Script Deep Dive: State Validation
+
+Type scripts are optional. While lock scripts protect ownership, type scripts validate **state transitions** -- they define rules for how a cell can be created, modified, or destroyed.
+
+**Execution timing:** Type scripts run on **both input cells AND output cells**. This is critical. When a transaction creates a new cell with a type script, that type script runs and can reject the creation. When a transaction consumes a cell with a type script, that type script also runs and can reject the consumption.
+
+This dual execution enables powerful patterns:
+
+- **Token conservation**: A UDT type script checks that `sum(input_amounts) >= sum(output_amounts)`, ensuring tokens are not created out of thin air
+- **NFT immutability**: An NFT type script verifies that certain fields remain unchanged when a cell is transferred
+- **State machine transitions**: A type script can enforce that a cell's state only changes in valid ways (e.g., an order can go from "open" to "filled" but not from "cancelled" to "open")
+
+```typescript
+// A type script for a UDT token:
+{
+  code_hash: "0x50bd8d...",   // Identifies the xUDT program
+  hash_type: "type",          // How to find the program
+  args: "0x7a3e..."           // Owner lock hash (defines who can mint)
+}
+```
+
+When is a type script used vs not used?
+
+| Cell Type | Has Type Script? | Why |
+|-----------|-----------------|-----|
+| Plain CKB | No | Just holds CKByte value, no special rules needed |
+| UDT token | Yes | Must enforce supply conservation |
+| NFT | Yes | Must enforce creation rules and transfer constraints |
+| Nervos DAO deposit | Yes | Must enforce deposit/withdrawal protocol |
+| Script code cell | Sometimes | May use type script for upgrade control |
+
+### Script Structure: code_hash, hash_type, args
+
+Every script -- whether lock or type -- has exactly three fields:
+
+**code_hash** (32 bytes): A hash that identifies which on-chain program to run. This is not the hash of the cell containing the script. How this hash maps to actual code depends on the hash_type field.
+
+**hash_type** (1 byte): Determines how CKB uses the code_hash to find the script's RISC-V binary in the transaction's cell deps. This field has four possible values, each with different implications for security and upgradeability.
+
+**args** (variable length): Arbitrary bytes passed to the script as input arguments. Each script defines its own args format. For SECP256K1-BLAKE160, this is a 20-byte pubkey hash. For multisig, this encodes the M-of-N configuration and participant pubkeys. For xUDT, this identifies who can mint the token.
+
+The combination of all three fields makes a script unique. Two cells with the same code_hash and hash_type but different args have different scripts and will be placed in different script groups.
+
+### hash_type Explained
+
+The hash_type field is one of CKB's most nuanced concepts. It controls two things: (1) how the code_hash finds the script binary, and (2) which version of the CKB-VM executes the script.
+
+**hash_type = "data"** (legacy, VM v0)
+
+The code_hash is the blake2b hash of the cell data that contains the script binary:
+
+```
+code_hash = blake2b(binary_code_in_cell)
+```
+
+CKB searches the transaction's cell deps for a cell whose data produces this exact hash. The script is pinned to an exact binary -- if even one byte of the code changes, the hash changes and the script reference breaks.
+
+This provides maximum security (you know exactly what code will run) but makes upgrades impossible without migrating every cell that references the old hash.
+
+Uses CKB-VM version 0 (the original virtual machine).
+
+**hash_type = "data1"** (VM v1, Mirana hard fork)
+
+Identical to "data" in how it finds the code, but uses CKB-VM version 1. VM v1 introduced bug fixes and new syscalls. Scripts compiled for VM v1 should use "data1".
+
+**hash_type = "data2"** (VM v2, CKB2023 hard fork)
+
+Identical to "data"/"data1" in how it finds the code, but uses CKB-VM version 2. VM v2 introduced the `spawn` syscall for inter-script communication and other enhancements. New scripts that want pinned references should use "data2".
+
+**hash_type = "type"** (upgradeable, VM v2)
+
+The code_hash is the blake2b hash of the **type script** on the cell that contains the code:
+
+```
+code_hash = blake2b(type_script_of_code_cell)
+```
+
+CKB searches cell deps for a cell whose type script produces this hash. The actual binary code can change (be deployed to a different cell) as long as the new cell has the same type script hash. This enables script upgrades without changing every reference.
+
+The type script on the code cell acts as a stable identifier -- like an ISBN number for a book. The book's content can be revised in a new edition, but the ISBN stays the same.
+
+Uses CKB-VM version 2.
+
+| hash_type | code_hash references | VM Version | Upgradeable? | Best for |
+|-----------|---------------------|------------|--------------|----------|
+| "data" | blake2b(cell_data) | v0 | No | Legacy scripts |
+| "data1" | blake2b(cell_data) | v1 | No | Post-Mirana pinned scripts |
+| "data2" | blake2b(cell_data) | v2 | No | New pinned scripts |
+| "type" | blake2b(type_script) | v2 | Yes | System scripts, upgradeable contracts |
+
+**Practical guidance:** Use "data2" when you want maximum security and immutability. Use "type" when you want the ability to upgrade scripts without migrating cells. Most system scripts (SECP256K1-BLAKE160, etc.) use "type" so the Nervos Foundation can fix bugs without breaking every address on the network.
+
+### Script Groups: Batching for Efficiency
+
+When a transaction is verified, CKB does not run each cell's script independently. Instead, it groups cells by their complete script identity (code_hash + hash_type + args) and runs each unique script only once.
+
+**How grouping works:**
+
+1. Collect all lock scripts from input cells
+2. Collect all type scripts from input cells AND output cells
+3. Group by identical (code_hash, hash_type, args) tuples
+4. Execute each group's script once, passing it the indices of all cells in the group
+
+**Example:** A transaction spends 5 cells from the same address (same lock script) and sends to 2 different addresses:
+
+- Lock script group 1: The sender's lock script runs once for all 5 input cells
+- Lock script group 2: (Lock scripts on outputs do NOT run -- only on inputs)
+- Type script groups: Any type scripts on inputs or outputs run once per unique type script
+
+This grouping is why a single signature can authorize spending multiple cells. The SECP256K1-BLAKE160 lock script receives the indices of all input cells in its group, verifies one signature over the entire transaction, and returns success for all of them at once.
+
+Script grouping also enables type scripts to validate aggregate properties. A UDT type script receives indices for ALL input and output cells with its type script. It can sum up the token amounts across all these cells and verify that the total is conserved:
+
+```
+sum(input_token_amounts) == sum(output_token_amounts)
+```
+
+Without script groups, each cell would only see itself and could not verify cross-cell invariants.
+
+### Cell Deps: How Scripts Find Their Code
+
+Scripts are identified by their code_hash, but the actual RISC-V binary code lives in regular cells on the blockchain. **Cell deps** (cell dependencies) are references in a transaction that tell CKB where to find the code.
+
+Every transaction must include cell deps for every script that will be executed. If a cell dep is missing, CKB cannot find the code and the transaction is rejected.
+
+**Two types of cell deps:**
+
+**dep_type = "code"**: The referenced cell's data field contains the script binary directly. Simple and straightforward.
+
+```
+cell_dep -> Cell { data: <RISC-V binary> }
+```
+
+**dep_type = "dep_group"**: The referenced cell's data contains a serialized list of OutPoints. Each OutPoint references another cell that contains script code. This is a convenience mechanism for bundling related scripts.
+
+```
+cell_dep -> Cell { data: [OutPoint_A, OutPoint_B, ...] }
+              |
+              +-> Cell A { data: <RISC-V binary 1> }
+              +-> Cell B { data: <RISC-V binary 2> }
+```
+
+The SECP256K1-BLAKE160 system script uses a dep_group that bundles both the secp256k1 cryptographic library and the blake160 lock script logic into a single cell dep reference.
+
+**Important:** Cell deps must reference live cells. If someone consumes the cell that contains your script code, transactions using that script will fail. System scripts are deployed in cells that are never consumed, ensuring they remain available.
+
+The CCC SDK handles cell deps automatically when building transactions. You typically do not need to specify them manually -- the SDK resolves them based on the scripts involved.
+
+### Common Built-in Scripts
+
+CKB comes with several pre-deployed scripts that form the foundation of the ecosystem:
+
+**SECP256K1-BLAKE160** (Lock Script)
+
+The default ownership script. Verifies a secp256k1 signature against a blake160 hash of the signer's public key. Used by virtually all standard CKB addresses. The `args` field contains the 20-byte pubkey hash.
+
+**SECP256K1-BLAKE160-MULTISIG** (Lock Script)
+
+An M-of-N multisignature lock script. Requires M signatures from a set of N authorized public keys to spend a cell. The `args` field encodes the multisig configuration: a reserved byte, require_first_n count, threshold (M), total pubkey count (N), followed by the blake160 hashes of all N pubkeys. Also supports time-locked spending via the transaction's `since` field.
+
+**Nervos DAO** (Type Script)
+
+CKB's built-in savings mechanism. Users deposit CKB into cells with the Nervos DAO type script and earn interest from CKB's secondary issuance. The type script validates the deposit and withdrawal state machine: deposits must have specific data, withdrawals must wait a minimum lock period, and interest calculations must be correct.
+
+**xUDT** (Type Script)
+
+The extensible User Defined Token standard. Validates that token amounts are conserved across transactions (inputs >= outputs, unless the minter is involved). The `args` field identifies the token issuer, and extension scripts can add custom logic like whitelists, blacklists, or transfer restrictions.
+
+### Script Execution Lifecycle
+
+Here is the complete flow of how scripts execute when a transaction is verified:
+
+1. **Resolve**: CKB resolves all input OutPoints to their live cells (fetching lock scripts, type scripts, and data). It also resolves all cell deps to load available script code.
+
+2. **Group**: CKB groups cells by script identity:
+   - All input lock scripts are grouped by (code_hash, hash_type, args)
+   - All input and output type scripts are grouped by (code_hash, hash_type, args)
+
+3. **Execute lock scripts**: For each lock script group, CKB finds the matching code in cell deps, loads the RISC-V binary into the CKB-VM sandbox, and executes it. The script can read the transaction data and witnesses. It must return 0.
+
+4. **Execute type scripts**: For each type script group, CKB does the same. The key difference is that type script groups include both input and output cell indices, so the script can validate the complete state transition.
+
+5. **Verify**: If all scripts returned 0, the transaction is valid. Input cells become dead (consumed), and output cells become live (created). If any script returned non-zero or errored, the entire transaction is rejected and no state changes occur.
+
+This all-or-nothing approach ensures atomicity: either the complete state transition happens, or nothing changes.
+
+## Step-by-Step Tutorial
+
+Follow these steps to build and run the Script Basics explorer.
+
+### Step 1: Set Up the Project
+
+```bash
+cd lessons/07-script-basics
+npm install
+```
+
+This installs the CCC SDK, TypeScript, and the tsx runtime.
+
+### Step 2: Connect to the Testnet
+
+The application starts by connecting to the CKB public testnet:
+
+```typescript
+import { ccc } from "@ckb-ccc/core";
+
+const client = new ccc.ClientPublicTestnet();
+const tip = await client.getTip();
+console.log(`Connected! Current block: ${tip}`);
+```
+
+### Step 3: Decode an Address to See Its Lock Script
+
+Every CKB address encodes a lock script. Decoding the address reveals the script structure:
+
+```typescript
+const address = await ccc.Address.fromString(
+  "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqfkcv98jy3q3fhn84n7s6r7c0kpqtsx56salqyeg",
+  client
+);
+const lockScript = address.script;
+
+// lockScript now contains:
+// {
+//   code_hash: "0x9bd7e06f...",   <- SECP256K1-BLAKE160 identifier
+//   hash_type: "type",            <- upgradeable reference
+//   args: "0x4b1c..."             <- 20-byte pubkey hash
+// }
+```
+
+### Step 4: Fetch a Cell and Examine Its Scripts
+
+Query for live cells and inspect their lock and type scripts:
+
+```typescript
+for await (const cell of client.findCellsByLock(lockScript, undefined, true, "desc", 5)) {
+  console.log("Lock script:", cell.cellOutput.lock);
+  console.log("Type script:", cell.cellOutput.type ?? "(none)");
+  console.log("Capacity:", cell.cellOutput.capacity);
+}
+```
+
+Cells without a type script are plain CKB cells. Cells with a type script have additional validation rules governing their lifecycle.
+
+### Step 5: Look Up Known Script Deployments
+
+The CCC SDK provides information about well-known scripts deployed on CKB:
+
+```typescript
+const secp256k1Info = await client.getKnownScript(ccc.KnownScript.Secp256k1Blake160);
+console.log("code_hash:", secp256k1Info.codeHash);
+console.log("hash_type:", secp256k1Info.hashType);
+
+const daoInfo = await client.getKnownScript(ccc.KnownScript.NervosDao);
+console.log("Nervos DAO code_hash:", daoInfo.codeHash);
+```
+
+### Step 6: Explore Script Groups in a Transaction
+
+Fetch a transaction and analyze how its scripts would be grouped:
+
+```typescript
+const txWithStatus = await client.getTransaction(txHash);
+const tx = txWithStatus.transaction;
+
+// Count unique lock scripts across inputs
+// Count unique type scripts across inputs and outputs
+// Each unique script = one script group = one execution
+```
+
+### Step 7: Run the Full Explorer
+
+```bash
+npx tsx src/index.ts
+```
+
+The application walks through all concepts with real testnet data, including formatted script structures, script group analysis, cell dep inspection, and a visual execution lifecycle diagram.
+
+## Running the Code
+
+```bash
+cd lessons/07-script-basics
+npm install
+npx tsx src/index.ts
+```
+
+The explorer demonstrates:
+
+1. Connecting to CKB testnet
+2. Decoding an address into its lock script components
+3. Fetching and displaying the SECP256K1-BLAKE160 lock script structure
+4. Finding cells with type scripts and explaining their role
+5. Demonstrating script groups with multiple cells sharing a lock script
+6. Displaying cell dep information for system scripts
+7. Comparing hash_type variants with a reference table
+8. Listing common built-in scripts and their purposes
+9. Tracing the complete script execution lifecycle
+10. Analyzing a real transaction's scripts, cell deps, and witnesses
+
+## Real-World Examples
+
+- **Bitcoin-like spending**: The SECP256K1-BLAKE160 lock script verifies a digital signature, just like Bitcoin's P2PKH
+- **Token transfers**: xUDT type scripts ensure tokens cannot be created from nothing during transfers
+- **Nervos DAO**: The DAO type script enforces correct interest calculations and lock periods
+- **Multisig wallets**: The multisig lock script requires M-of-N signatures, enabling shared custody
+
+## Summary
+
+CKB's script system is fundamentally different from other smart contract platforms:
+
+- **Scripts are validators**: They approve or reject proposed state transitions but never modify state directly
+- **Lock scripts** protect ownership and run only on input cells (when spending)
+- **Type scripts** validate state transitions and run on both input and output cells (creation and consumption)
+- **Script structure** consists of three fields: code_hash (identifies the program), hash_type (how to find it), and args (script-specific parameters)
+- **hash_type** determines whether a script is pinned to an exact binary ("data"/"data1"/"data2") or can be upgraded ("type")
+- **Script groups** batch cells with identical scripts for efficient single-execution verification
+- **Cell deps** reference cells containing RISC-V binaries, connecting script identifiers to actual code
+- **Built-in scripts** like SECP256K1-BLAKE160, multisig, and Nervos DAO provide foundational functionality
+- **The execution lifecycle** follows a resolve-group-execute-verify pipeline that ensures atomic state transitions
+
+## What's Next
+
+In the next lesson, we will build a custom hash lock script -- a simple lock script that uses a hash preimage for spending authorization instead of a digital signature. This will give you hands-on experience writing, deploying, and testing your own CKB scripts.

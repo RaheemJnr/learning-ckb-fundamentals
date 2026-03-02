@@ -1,0 +1,101 @@
+{
+  "lessonId": 12,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What does 'rv64imc' mean in the context of CKB-VM's instruction set?",
+      "options": [
+        "rv=RISC-V, 64=64-bit registers, i=integer base, m=memory management, c=cryptography extension",
+        "rv=RISC-V, 64=64-bit registers, i=integer base ISA, m=multiply/divide extension, c=compressed 16-bit instruction extension",
+        "rv=register vector, 64=64 registers, i=indexed mode, m=machine mode, c=compact mode",
+        "rv=RISC-V, 64=maximum 64 instructions, i=immediate values, m=memory mapped I/O, c=coprocessor support"
+      ],
+      "correctAnswer": 1,
+      "explanation": "rv64imc is a standard RISC-V ISA descriptor: 'rv' means RISC-V, '64' means 64-bit registers and address space, 'i' means the base Integer instruction set (~47 instructions including arithmetic, logic, loads, stores, branches), 'm' means the Multiply/divide extension (adds MUL, DIV, REM instructions), and 'c' means the Compressed instruction extension (16-bit encodings for common instructions, reducing binary size by ~25-30%). CKB chose this specific combination because it provides everything needed for smart contract execution without unnecessary complexity."
+    },
+    {
+      "id": 2,
+      "question": "Why did CKB choose RISC-V over Ethereum's EVM (bytecode stack machine) as its virtual machine architecture?",
+      "options": [
+        "RISC-V is proprietary to Nervos, giving CKB a competitive advantage over other blockchains",
+        "RISC-V is the only ISA that supports deterministic execution for blockchain use cases",
+        "RISC-V is an open standard with ~47 base instructions, mature compiler support (GCC/LLVM), deterministic behavior, and enables any language that compiles to RISC-V to write scripts",
+        "RISC-V scripts execute in constant time, making them immune to denial-of-service attacks"
+      ],
+      "correctAnswer": 2,
+      "explanation": "CKB chose RISC-V for several reasons that the EVM does not satisfy: RISC-V is an open ISA with no licensing fees, making it independently implementable by anyone. The base ISA has ~47 instructions (vs thousands for x86), making the VM small and auditable. GCC and LLVM both support RISC-V as first-class targets, so Rust, C, Zig, and Go can all compile to CKB scripts without special tooling. Any language with a RISC-V backend works — unlike the EVM which requires writing Solidity or compiling to EVM bytecode. Additionally, RISC-V is gaining real hardware adoption, which could eventually allow scripts to run on native RISC-V processors."
+    },
+    {
+      "id": 3,
+      "question": "What is the ONLY way a CKB script can interact with transaction data (read cell values, load scripts, get witnesses)?",
+      "options": [
+        "Global variables that are pre-populated by the VM before the script starts",
+        "A memory-mapped I/O region at a fixed address that the script can read directly",
+        "Syscalls invoked via the RISC-V ECALL instruction with a syscall number in register a7",
+        "A special 'transaction context' argument passed to the script's main function"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Syscalls are the only I/O channel available to CKB scripts. They are invoked using the RISC-V ECALL instruction with the syscall number in register a7 and parameters in registers a0-a6. The ckb-std crate wraps these into Rust functions like load_cell_data(), load_tx_hash(), and load_witness(). This strict isolation is fundamental to CKB's security model: scripts cannot access any external state (filesystem, network, host memory) and cannot communicate with each other except through the shared transaction structure. Every script runs in a fresh, sandboxed VM instance."
+    },
+    {
+      "id": 4,
+      "question": "Which syscall should a lock script use to get the message (the data to verify a signature against)?",
+      "options": [
+        "load_script() to get the script args, which contain the message to sign",
+        "load_tx_hash() (syscall 2061) to load the 32-byte blake2b hash of the current transaction",
+        "load_witness() to directly load the signed message from the witnesses",
+        "load_cell_data() to read the message stored in the cell's data field"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Lock scripts verify that the transaction was authorized by the cell's owner. The standard approach is to use load_tx_hash() (syscall number 2061) to get the 32-byte blake2b hash of the transaction being validated. This hash is the 'message' in the signature scheme. The script then calls load_witness() to get the signature provided by the spender, and verifies the signature against the transaction hash using the public key hash stored in the script's args. Signing the transaction hash (rather than, say, just the output data) ensures that the authorization covers the complete transaction — what is being spent and what is being created."
+    },
+    {
+      "id": 5,
+      "question": "How many cycles does a memory load instruction (like LD or LW) cost in CKB-VM compared to an arithmetic instruction (like ADD)?",
+      "options": [
+        "Memory loads cost 1 cycle, the same as arithmetic — CKB-VM models them as equally fast",
+        "Memory loads cost 3 cycles; arithmetic operations cost 1 cycle — memory is 3x more expensive",
+        "Memory loads cost 10 cycles; arithmetic operations cost 1 cycle — memory is the bottleneck",
+        "Cycle costs vary dynamically based on current memory pressure and cache state"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB-VM assigns fixed, deterministic cycle costs to each instruction category: ALU operations (ADD, SUB, AND, OR, XOR, shifts) cost 1 cycle each; memory loads (LB, LH, LW, LD) and stores (SB, SH, SW, SD) cost 3 cycles each; branches and jumps cost 3 cycles each; multiply/divide (M extension) cost 5 cycles each. The 3x cost for memory reflects the real-world performance difference between computation and memory access. For script optimization, this means minimizing unnecessary memory reads/writes and preferring to keep values in registers. Syscalls have a much higher fixed overhead (~500+ cycles)."
+    },
+    {
+      "id": 6,
+      "question": "What is the approximate cycle limit per transaction in CKB, and how is it shared?",
+      "options": [
+        "1 million cycles per script, with each script having its own independent budget",
+        "100 million cycles total, split equally among all scripts in the transaction",
+        "Approximately 70 billion cycles total, shared across ALL scripts in the transaction — if the combined total exceeds the limit, the entire transaction fails",
+        "There is no cycle limit; scripts can run for as long as needed"
+      ],
+      "correctAnswer": 2,
+      "explanation": "CKB's transaction cycle limit is approximately 70 billion cycles, and this budget is shared across all scripts that run during transaction validation — all lock scripts and all type scripts combined. If a transaction has two lock scripts each consuming 40 billion cycles, the total (80 billion) exceeds the limit and the transaction fails even though each individual script would be acceptable alone. In practice, most transactions use a tiny fraction of the budget: a typical secp256k1 lock script verification costs ~1.2 million cycles and a simple type script costs ~500,000 cycles, meaning typical transactions use under 0.01% of the available 70 billion cycle budget."
+    },
+    {
+      "id": 7,
+      "question": "What is the benefit of the RISC-V Compressed (C) extension for CKB scripts specifically?",
+      "options": [
+        "The C extension adds hardware cryptography acceleration that makes SHA-256 much faster",
+        "The C extension provides memory compression that allows scripts to use more than 4MB of RAM",
+        "The C extension provides 16-bit encodings for common instructions, reducing binary size by ~25-30%, which directly lowers the CKB capacity cost to store the script on-chain",
+        "The C extension enables parallel execution of multiple instructions in a single cycle"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The Compressed instruction extension (C) provides 16-bit encodings for the most commonly used RISC-V instructions (like C.ADD, C.LW, C.SW, C.J, C.BEQZ). Normal RISC-V instructions are 32 bits each. A typical binary compiled with the C extension is 25-30% smaller. For CKB specifically, this matters because script binaries are stored in cells on-chain, and cell capacity — the amount of CKB you must lock up to store data — is directly proportional to the number of bytes stored. A script binary that is 30% smaller requires 30% less CKB to deploy, reducing the capital cost for developers. The compiler handles C extension usage automatically."
+    },
+    {
+      "id": 8,
+      "question": "What makes CKB's approach to cryptography different from Bitcoin's or Ethereum's, and what does this enable?",
+      "options": [
+        "CKB uses quantum-resistant cryptography by default, while Bitcoin and Ethereum use classical algorithms",
+        "CKB hardcodes SHA-256 and secp256k1 just like Bitcoin, but allows additional algorithms as optional extensions",
+        "CKB does not hardcode any cryptographic algorithms — since CKB-VM executes general RISC-V code, any algorithm that can be compiled to RISC-V can be used as a lock or type script, enabling WebAuthn, Ed25519, BLS, RSA, and post-quantum schemes without protocol changes",
+        "CKB delegates all cryptographic operations to a hardware security module, making them protocol-independent"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Bitcoin hardcodes SHA-256 + RIPEMD-160 for addresses and secp256k1 ECDSA for signatures. Ethereum hardcodes keccak-256 and secp256k1 (via the ecrecover precompile). Adding a new algorithm requires a protocol upgrade (hard fork). CKB takes a different approach: there are no cryptographic algorithms built into CKB-VM itself. Signature verification happens inside regular scripts — the default secp256k1 lock script is just a deployed CKB script that anyone could have written. This means secp256r1 (for WebAuthn/Passkeys), Ed25519 (for Solana-compatible keys), BLS (for aggregate signatures), RSA, Schnorr, and even post-quantum algorithms (Dilithium, FALCON) can be deployed as CKB lock scripts today without any protocol changes. This is what makes Omnilock — a single lock supporting multiple authentication methods — possible."
+    }
+  ]
+}

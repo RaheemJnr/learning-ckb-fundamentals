@@ -1,0 +1,268 @@
+// ============================================================================
+// custom.mol — Molecule Schema Definitions for CKB
+// ============================================================================
+//
+// This file defines custom molecule types used in our lesson. Molecule is the
+// canonical serialization format used throughout CKB. Every piece of data
+// stored on-chain (cells, scripts, transactions) uses molecule encoding.
+//
+// Molecule schemas are written in .mol files and can be compiled into Rust
+// structs, C headers, or other language bindings using the `moleculec` tool.
+//
+// Key principles of molecule:
+//   - Binary format: compact, no field names stored, just raw bytes
+//   - Canonical: the same data always produces the same bytes (deterministic)
+//   - Zero-copy: fields can be read directly from the byte buffer without
+//     deserializing the entire structure first
+//
+// Molecule Primitive Types:
+//   - byte         — a single unsigned byte (uint8)
+//   - array        — fixed-length sequence of a single type
+//   - struct       — fixed-size composite of other fixed-size types (no length prefix)
+//   - vector       — variable-length sequence of a single type (with length prefix)
+//   - table        — variable-size composite with optional fields (like a struct, but dynamic)
+//   - option       — a value that may or may not be present
+//   - union        — one of several possible types (tagged)
+//
+// Naming convention: PascalCase for type names.
+// ============================================================================
+
+
+// ============================================================================
+// ARRAYS — Fixed-size byte sequences
+// ============================================================================
+// Arrays have a known, fixed size at compile time. They are NOT prefixed with
+// a length header because their size is always the same.
+//
+// Syntax: array <Name> [byte; <N>];
+
+// A 32-byte hash, used everywhere in CKB (e.g., code_hash in Script)
+array Byte32 [byte; 32];
+
+// A 20-byte hash, commonly used for lock script args (like Ethereum addresses)
+array Byte20 [byte; 20];
+
+// A 4-byte unsigned integer (little-endian), used for small counters and indexes
+array Uint32 [byte; 4];
+
+// An 8-byte unsigned integer (little-endian), used for capacity values (shannons)
+array Uint64 [byte; 8];
+
+// A 16-byte unsigned integer (little-endian), used for UDT (token) balances
+array Uint128 [byte; 16];
+
+
+// ============================================================================
+// STRUCT — Fixed-size composite types
+// ============================================================================
+// Structs contain only fixed-size fields (bytes, arrays, other structs).
+// Like arrays, structs have NO length prefix because their total size is
+// always known at compile time. Fields are laid out sequentially with no gaps.
+//
+// Structs are the most efficient molecule type because reading any field is
+// a simple offset calculation — no parsing required.
+//
+// Syntax:
+//   struct <Name> {
+//       field_name: FieldType,
+//   }
+
+// TokenInfo represents metadata about a fungible token.
+// Total size = 32 + 32 + 1 + 16 = 81 bytes (always exactly 81 bytes).
+//
+// Note: In a real deployment you would typically store name and symbol as
+// fixed-length byte arrays rather than Byte32. We use Byte32 here to keep
+// the example simple — the name/symbol would be UTF-8 encoded and
+// right-padded with zeros.
+struct TokenInfo {
+    // Token name, UTF-8 encoded, right-padded with 0x00 to fill 32 bytes
+    name:         Byte32,
+    // Token symbol (e.g., "CKB"), UTF-8 encoded, right-padded with 0x00
+    symbol:       Byte32,
+    // Number of decimal places (e.g., 8 for CKB, 18 for many ERC-20 tokens)
+    decimals:     byte,
+    // Total supply of the token in base units (little-endian uint128)
+    total_supply: Uint128,
+}
+
+// A point in 2D space. Total size = 4 + 4 = 8 bytes.
+struct Point {
+    x: Uint32,
+    y: Uint32,
+}
+
+
+// ============================================================================
+// VECTORS — Variable-length sequences
+// ============================================================================
+// Vectors are dynamic-length lists of a single type. They are prefixed with
+// a 4-byte little-endian length header that stores the TOTAL byte length
+// of the serialized vector (including the header itself for fixed-size items,
+// or including offset headers for variable-size items).
+//
+// There are two kinds:
+//   - FixVec: vector of fixed-size items. Header = 4-byte item count, then items.
+//   - DynVec: vector of variable-size items. Header = 4-byte total size, then
+//             4-byte offsets for each item, then the items themselves.
+//
+// Syntax: vector <Name> <ItemType>;
+
+// A vector of 32-byte hashes (FixVec — each item is exactly 32 bytes)
+vector Byte32Vec <Byte32>;
+
+// A vector of bytes (FixVec — each item is 1 byte). Equivalent to a byte string.
+vector Bytes <byte>;
+
+// A vector of TokenInfo structs (FixVec — each item is exactly 81 bytes)
+vector TokenInfoVec <TokenInfo>;
+
+// A vector of variable-length byte strings (DynVec — each Bytes item is variable)
+vector BytesVec <Bytes>;
+
+
+// ============================================================================
+// TABLE — Variable-size composite types (like struct, but dynamic)
+// ============================================================================
+// Tables are similar to structs, but they can contain variable-size fields
+// (vectors, other tables, options). Because field sizes are not known at
+// compile time, tables include a header with:
+//   - 4-byte total size
+//   - 4-byte offset for each field
+//
+// Tables support schema evolution: new fields can be appended without
+// breaking compatibility with old readers (they simply ignore unknown fields).
+//
+// Tables are slightly less efficient than structs because accessing a field
+// requires reading its offset from the header first. But they are far more
+// flexible.
+//
+// Syntax:
+//   table <Name> {
+//       field_name: FieldType,
+//   }
+
+// TokenMetadata stores rich information about a token. Unlike TokenInfo (a struct),
+// this uses variable-length fields and is encoded as a table.
+table TokenMetadata {
+    // Token name as a variable-length byte string
+    name:          Bytes,
+    // Token symbol as a variable-length byte string
+    symbol:        Bytes,
+    // Decimal places (fixed-size, but tables can mix fixed and variable fields)
+    decimals:      byte,
+    // Total supply as a 128-bit unsigned integer
+    total_supply:  Uint128,
+    // Optional description text
+    description:   Bytes,
+    // Optional website URL
+    website:       Bytes,
+    // Optional icon URL or data
+    icon:          Bytes,
+}
+
+// TransferRecord stores information about a token transfer.
+table TransferRecord {
+    // Sender's lock hash (32 bytes)
+    from_lock_hash:  Byte32,
+    // Recipient's lock hash (32 bytes)
+    to_lock_hash:    Byte32,
+    // Amount transferred (128-bit unsigned integer, little-endian)
+    amount:          Uint128,
+    // Optional memo/note attached to the transfer
+    memo:            Bytes,
+}
+
+// A list of transfer records (DynVec because TransferRecord is a table)
+vector TransferRecordVec <TransferRecord>;
+
+
+// ============================================================================
+// OPTION — Optional values
+// ============================================================================
+// An option is either empty (0 bytes) or contains exactly one value.
+// This is useful for fields that may or may not be present.
+//
+// Syntax: option <Name> (InnerType);
+
+// An optional 32-byte hash
+option Byte32Opt (Byte32);
+
+// An optional byte string
+option BytesOpt (Bytes);
+
+// An optional token metadata record
+option TokenMetadataOpt (TokenMetadata);
+
+
+// ============================================================================
+// UNION — Tagged union (sum type)
+// ============================================================================
+// A union holds exactly one value from a set of possible types. It is prefixed
+// with a 4-byte "item_id" that identifies which variant is stored.
+//
+// The item_id is assigned based on the order of types in the declaration:
+//   - First type  = item_id 0
+//   - Second type = item_id 1
+//   - etc.
+//
+// Unions are used in CKB for things like the WitnessArgs fields, where the
+// witness data can be one of several formats depending on the lock script.
+//
+// Syntax:
+//   union <Name> {
+//       TypeA,
+//       TypeB,
+//       ...
+//   }
+
+// TokenAction represents the different operations that can be performed on a token.
+// When stored in cell data, the first 4 bytes indicate which action this is:
+//   0 = Transfer (a transfer record)
+//   1 = Mint (token metadata for newly created tokens)
+//   2 = Burn (a simple byte string indicating the burn amount/reason)
+union TokenAction {
+    TransferRecord,      // item_id = 0: a token transfer
+    TokenMetadata,       // item_id = 1: mint operation (contains full metadata)
+    Bytes,               // item_id = 2: burn operation (contains burn details)
+}
+
+
+// ============================================================================
+// REFERENCE: CKB's Built-in Molecule Types
+// ============================================================================
+// CKB defines its core data structures using molecule. These are defined in
+// the blockchain.mol schema that ships with CKB. Here they are for reference
+// (do NOT redefine them in your own schemas — import them instead):
+//
+//   array Byte32 [byte; 32];
+//
+//   // The Script type identifies a piece of on-chain code and its arguments
+//   table Script {
+//       code_hash: Byte32,      // Hash of the script's code (or type_id)
+//       hash_type: byte,        // 0x00 = data, 0x01 = type, 0x02 = data1, 0x04 = data2
+//       args:      Bytes,       // Arguments passed to the script
+//   }
+//
+//   // A cell output: the "envelope" of a cell (without the data payload)
+//   table CellOutput {
+//       capacity: Uint64,       // CKByte capacity in shannons
+//       lock:     Script,       // Lock script (determines ownership)
+//       type_:    ScriptOpt,    // Optional type script (determines cell type)
+//   }
+//
+//   // A full transaction
+//   table RawTransaction {
+//       version:      Uint32,
+//       cell_deps:    CellDepVec,
+//       header_deps:  Byte32Vec,
+//       inputs:       CellInputVec,
+//       outputs:      CellOutputVec,
+//       outputs_data: BytesVec,
+//   }
+//
+//   table Transaction {
+//       raw:        RawTransaction,
+//       witnesses:  BytesVec,
+//   }
+//
+// ============================================================================

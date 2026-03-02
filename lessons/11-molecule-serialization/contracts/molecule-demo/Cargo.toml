@@ -1,0 +1,30 @@
+[package]
+name = "molecule-demo"
+version = "0.1.0"
+edition = "2021"
+description = "Lesson 11: Demonstrates molecule serialization in a CKB script"
+
+# CKB scripts are no_std by default — they run in CKB-VM (a RISC-V virtual machine)
+# with no operating system, so we cannot use Rust's standard library.
+
+[dependencies]
+# The core molecule runtime for reading/verifying molecule-encoded data.
+# `bytes_vec` feature enables the BytesVec type we need.
+molecule = { version = "0.8", default-features = false }
+
+# CKB standard library for on-chain scripts. Provides:
+#   - Syscall wrappers (load_cell_data, load_script, etc.)
+#   - Debug macros
+#   - Entry point macro
+ckb-std = "0.16"
+
+# Pre-generated molecule types for CKB's built-in schemas (Script, CellOutput, etc.)
+ckb-types = { package = "ckb-gen-types", version = "0.116", default-features = false }
+
+[profile.release]
+# CKB scripts should be as small as possible to minimize on-chain storage costs.
+opt-level = "s"       # Optimize for binary size
+lto = true            # Link-time optimization for smaller binaries
+codegen-units = 1     # Better optimization at the cost of compile time
+panic = "abort"       # No unwinding — smaller binary, scripts should never panic
+strip = true          # Remove debug symbols

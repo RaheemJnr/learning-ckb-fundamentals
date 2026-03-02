@@ -1,0 +1,16 @@
+{
+  "name": "12-ckb-vm-deep-dive",
+  "version": "1.0.0",
+  "description": "Lesson 12: CKB-VM Deep Dive — explore the RISC-V virtual machine that powers CKB scripts",
+  "private": true,
+  "scripts": {
+    "start": "npx tsx src/index.ts",
+    "syscalls": "npx tsx src/syscalls.ts",
+    "dev": "npx tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@ckb-ccc/core": "^1.2.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "09-script-debugging",
+  "version": "1.0.0",
+  "description": "Lesson 9: Debugging CKB Scripts — learn to diagnose and fix common CKB script errors",
+  "private": true,
+  "scripts": {
+    "start": "npx tsx src/index.ts",
+    "errors": "npx tsx src/error-guide.ts",
+    "dev": "npx tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@ckb-ccc/core": "^1.2.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,18 @@
+[package]
+name = "buggy-lock"
+version = "0.1.0"
+edition = "2021"
+
+# This is a CKB lock script intentionally filled with bugs for learning purposes.
+# Students will use debugging tools and techniques to find and fix the issues.
+# See the companion `fixed-lock` crate for the corrected version.
+
+[dependencies]
+ckb-std = "0.16"
+
+[profile.release]
+overflow-checks = true
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

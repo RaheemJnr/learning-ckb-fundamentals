@@ -1,0 +1,15 @@
+{
+  "name": "08-hash-lock-script",
+  "version": "1.0.0",
+  "description": "Lesson 8: Your First Lock Script (Rust) - Deploy and interact with a hash-lock script on CKB",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "npx tsx src/index.ts",
+    "dev": "npx tsx --watch src/index.ts"
+  },
+  "dependencies": {
+    "@ckb-ccc/core": "latest",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

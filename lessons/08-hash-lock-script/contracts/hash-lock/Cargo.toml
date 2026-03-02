@@ -1,0 +1,53 @@
+[package]
+# -------------------------------------------------------------------
+# CKB Hash Lock Script
+# -------------------------------------------------------------------
+# This crate contains an on-chain lock script for the Nervos CKB
+# blockchain. When compiled, it produces a RISC-V binary that runs
+# inside the CKB-VM (CKB's virtual machine).
+#
+# Lock scripts control WHO can spend (consume) a cell. This particular
+# lock script implements a "hash lock": a cell can only be consumed if
+# the spender provides a preimage whose blake2b hash matches the hash
+# stored in the script's args field.
+# -------------------------------------------------------------------
+name = "hash-lock"
+version = "0.1.0"
+edition = "2021"
+
+# -------------------------------------------------------------------
+# Dependencies
+# -------------------------------------------------------------------
+# ckb-std: The standard library for CKB script development.
+#   - Provides syscalls to interact with CKB-VM (load script args,
+#     load witnesses, load cell data, etc.)
+#   - Provides the blake2b hashing implementation
+#   - Provides memory allocation for no_std environments
+#   - Provides error handling and entry point macros
+#
+# Since CKB scripts run in a bare-metal RISC-V environment (no OS),
+# we cannot use Rust's standard library. ckb-std fills that gap.
+# -------------------------------------------------------------------
+[dependencies]
+ckb-std = "0.16"
+
+# -------------------------------------------------------------------
+# Profile: Release Build
+# -------------------------------------------------------------------
+# CKB scripts should be as small as possible because:
+#   1. Larger scripts cost more CKB to store on-chain (capacity)
+#   2. Larger scripts consume more execution cycles in CKB-VM
+#
+# These settings optimize for minimal binary size:
+#   - opt-level = "s": Optimize for size rather than speed
+#   - lto = true: Link-Time Optimization eliminates dead code
+#   - codegen-units = 1: Single codegen unit allows better optimization
+#   - panic = "abort": No unwinding support (saves binary size)
+#   - strip = true: Remove debug symbols from the final binary
+# -------------------------------------------------------------------
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

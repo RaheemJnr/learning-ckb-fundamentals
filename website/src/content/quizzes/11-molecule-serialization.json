@@ -1,0 +1,101 @@
+{
+  "lessonId": 11,
+  "questions": [
+    {
+      "id": 1,
+      "question": "Why did CKB choose Molecule instead of JSON for on-chain data serialization?",
+      "options": [
+        "JSON is too slow to transmit over the internet, so Molecule was chosen for its network efficiency",
+        "JSON is not canonical — the same data can produce different byte sequences (different key order, whitespace, number representations) — which breaks content-addressing and hashing",
+        "JSON requires a special license for commercial blockchain use",
+        "Molecule is human-readable which makes debugging on-chain data easier"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Blockchain systems require deterministic serialization: the same data must always produce exactly the same bytes because transaction IDs, script hashes, and cell output hashes are computed by hashing the serialized bytes. JSON violates this requirement in multiple ways: key ordering is not specified ('{\"a\":1,\"b\":2}' and '{\"b\":2,\"a\":1}' represent the same object but produce different bytes), whitespace is optional, and numbers can be represented multiple ways. Molecule was designed to be canonical — one and only one valid byte sequence exists for any given value."
+    },
+    {
+      "id": 2,
+      "question": "What is the total size of a Molecule struct with fields: Byte32 (32 bytes), byte (1 byte), and Uint128 (16 bytes)?",
+      "options": [
+        "53 bytes plus a 4-byte header, totaling 57 bytes",
+        "49 bytes, with each field preceded by a 1-byte tag",
+        "49 bytes, exactly — structs have no headers or padding",
+        "The size varies depending on the actual values stored in the fields"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Molecule structs contain ONLY fixed-size fields (bytes, arrays, and other structs). The total size is simply the sum of field sizes: 32 + 1 + 16 = 49 bytes. There is no header, no length prefix, and no padding between fields. This is what makes structs so efficient — accessing any field is a constant-time pointer arithmetic operation using known byte offsets, and there is zero overhead from metadata."
+    },
+    {
+      "id": 3,
+      "question": "What is the difference between a FixVec and a DynVec in Molecule?",
+      "options": [
+        "FixVec stores items sorted in ascending order; DynVec stores items in insertion order",
+        "FixVec has a 4-byte item count header and stores fixed-size items; DynVec has a 4-byte total-size header plus per-item offsets and stores variable-size items",
+        "FixVec is used for on-chain data and DynVec is used for off-chain data",
+        "FixVec is faster to read but limited to 256 items; DynVec supports unlimited items"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Both are variants of the Molecule 'vector' type, chosen automatically by the compiler based on the item type. FixVec is used when items are all the same fixed size (bytes, arrays, structs): its header is a 4-byte little-endian item count, and items are stored consecutively. Since item sizes are known, any item can be accessed with simple arithmetic: item_offset = 4 + index * item_size. DynVec is used when items are variable size (other vectors, tables): its header is a 4-byte total size followed by one 4-byte offset per item, then the item data. Item sizes are inferred from the gap between consecutive offsets."
+    },
+    {
+      "id": 4,
+      "question": "How does a Molecule 'option' type encode the absent (None) case?",
+      "options": [
+        "It writes a single 0x00 byte to represent None, or 0x01 followed by the value for Some",
+        "It writes a 4-byte tag: 0 for None, 1 for Some, followed by the value",
+        "None is encoded as zero bytes (completely empty), and Some(x) is encoded as just the raw bytes of x with no tag",
+        "None is encoded as 4 zero bytes representing a null pointer"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Molecule options have no tag byte — presence is determined entirely by byte count. None is completely empty (0 bytes). Some(x) is just the raw bytes of the inner value x. The reader determines which case applies by checking whether there are any bytes in the option's allocated space. Inside tables, this is determined by whether the field's offset range (from its own offset to the next field's offset) contains any bytes. This encoding is extremely compact: an absent option takes literally zero bytes."
+    },
+    {
+      "id": 5,
+      "question": "In what byte order does Molecule encode all multi-byte integers?",
+      "options": [
+        "Big-endian (most significant byte first), matching network byte order",
+        "Little-endian (least significant byte first), matching RISC-V native byte order",
+        "The byte order depends on the platform the encoder runs on",
+        "Molecule uses variable-length integer encoding (like Protocol Buffers varints)"
+      ],
+      "correctAnswer": 1,
+      "explanation": "All multi-byte integers in Molecule — including the 4-byte headers in vectors and tables, and all Uint32/Uint64/Uint128 array types — use little-endian byte order. This is a deliberate design choice: CKB-VM runs on RISC-V, which is also little-endian. This means on-chain scripts can read integers from Molecule data without any byte-swapping, which saves cycles. For example, the number 300 (0x0000012c) encodes as [2c 01 00 00] in little-endian. This is the most common source of encoding bugs when developers used to big-endian formats start working with Molecule."
+    },
+    {
+      "id": 6,
+      "question": "What is the binary format of a Molecule 'table' type?",
+      "options": [
+        "A JSON-like key-value structure where field names are stored as null-terminated strings",
+        "A 4-byte total size, followed by one 4-byte offset per field pointing to where that field's data starts, followed by all field data concatenated",
+        "An ordered list of type-length-value (TLV) triples, one per field",
+        "Identical to a struct — just concatenated field bytes with no header"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Tables use the same binary format as DynVec: [4-byte total_size] [4-byte offset_0] [4-byte offset_1] ... [field_0 data] [field_1 data] ... The total_size includes the entire header and all field data. Each offset points to the absolute byte position where the corresponding field's data starts. Field sizes are inferred from the gap between consecutive offsets (or between the last offset and total_size). This design enables zero-copy field access: to read field N, you look up offset[N] in the header, then jump directly to that position — no need to parse any other fields."
+    },
+    {
+      "id": 7,
+      "question": "Which of the following is a key advantage of Molecule's 'table' type over 'struct' for on-chain schemas?",
+      "options": [
+        "Tables are always smaller than structs because they use compression",
+        "Tables can have fields added to the END of the schema without breaking old readers, enabling forward-compatible schema evolution",
+        "Tables support encryption of individual fields, while structs do not",
+        "Tables allow fields to be in any order, while structs enforce alphabetical ordering"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Tables support schema evolution: you can add new fields to the end of a table definition and old readers will continue to work. Old readers only read offsets up to the number of fields they know about, and they stop reading at the last known offset — extra bytes at the end are simply ignored. Structs do not support this: changing a struct's definition changes its byte layout and breaks all existing readers. This is why CKB's own types like Script and Transaction use tables rather than structs — it allows the protocol to be upgraded by adding fields without breaking existing clients."
+    },
+    {
+      "id": 8,
+      "question": "When reading a TokenInfo struct (81 bytes) inside a Rust CKB script, which approach correctly accesses the 'decimals' field at byte offset 64?",
+      "options": [
+        "molecule::deserialize::<TokenInfo>(&cell_data).decimals()",
+        "cell_data[64] — direct byte access using the known fixed offset, no parsing required",
+        "load_cell_field(64, FieldType::Byte, Source::GroupOutput)",
+        "TokenInfo::from_bytes(&cell_data).get_field(\"decimals\")"
+      ],
+      "correctAnswer": 1,
+      "explanation": "For Molecule structs, all field positions are fixed at compile time based on the sum of preceding field sizes. The TokenInfo decimals field is at offset 32 (name) + 32 (symbol) = 64. You read it with a single array index: cell_data[64]. No parsing, no deserialization, no allocation — just one byte read. This is zero-copy access and is exactly how CKB scripts should read struct fields for maximum efficiency. The molecule crate's generated code does the same thing under the hood when you use the accessor methods, but you can also do it manually for full transparency."
+    }
+  ]
+}

@@ -1,0 +1,558 @@
+# CKB-VM Deep Dive
+
+## Overview
+
+Every CKB script — whether it is a lock script controlling who can spend a cell, or a type script enforcing data integrity rules — runs inside **CKB-VM**, a pure software implementation of the RISC-V instruction set architecture. Understanding CKB-VM is the difference between writing scripts that work and writing scripts that are secure, efficient, and maintainable.
+
+In this lesson you will explore the internals of CKB-VM: the RISC-V ISA it implements, how scripts execute, every syscall available to scripts, how cycles are measured and bounded, and how to write scripts that make the most of the execution environment.
+
+By the end of this lesson you will be able to:
+
+- Explain what CKB-VM is and why CKB chose RISC-V
+- Identify the rv64imc instruction set extensions and what each provides
+- List and use the complete set of CKB syscalls
+- Estimate cycle costs for common operations
+- Apply optimization techniques to reduce script cycle consumption
+- Explain CKB's model of cryptographic freedom
+
+## Prerequisites
+
+- Completion of Lessons 1-11 (Cell Model through Molecule Serialization)
+- Basic familiarity with Rust `no_std` development
+- Optional: familiarity with assembly language concepts
+
+## Concepts
+
+### What Is CKB-VM?
+
+CKB-VM is a pure software RISC-V implementation written in Rust. It is the execution engine that runs every CKB script. "Pure software" means there is no hardware dependency: CKB-VM is an interpreter that reads RISC-V machine code instructions and simulates their execution, tracking registers, memory, and cycle counts in Rust data structures.
+
+CKB-VM runs scripts in a tightly controlled **sandbox**:
+
+- No filesystem access
+- No network access
+- No randomness or entropy sources
+- No access to the host machine's memory
+- No inter-script communication except through transaction structure
+- Input and output only through a defined set of **syscalls**
+
+This sandboxing is fundamental to blockchain security. Every node on the network must execute the same script on the same inputs and get exactly the same result. Any non-determinism (random numbers, timestamps, network calls) would cause different nodes to disagree about whether a transaction is valid — breaking consensus.
+
+### Why RISC-V?
+
+The choice of instruction set architecture is one of the most important design decisions in a blockchain's virtual machine. CKB chose RISC-V for six specific reasons:
+
+**1. Open Standard**: RISC-V is an open ISA maintained by RISC-V International, a nonprofit organization. Unlike x86-64 (controlled by Intel/AMD with patent encumbrances) or ARM (licensed commercially), anyone can implement RISC-V without paying fees or signing license agreements. This means CKB-VM's specification is publicly verifiable and the VM can be implemented independently by anyone.
+
+**2. Simplicity and Auditability**: The base RISC-V integer ISA (RV64I) defines approximately 47 instructions. This is an order of magnitude simpler than x86-64 (which has thousands of instructions in various formats). A simpler ISA means a smaller, more auditable VM implementation — critical for consensus software where bugs can be catastrophic. The entire CKB-VM implementation is roughly 3,000 lines of Rust code.
+
+**3. Determinism**: RISC-V defines precise behavior for every instruction, including edge cases like integer overflow and division semantics. There is no undefined behavior at the ISA level. This determinism guarantee — essential for consensus — is built into the specification rather than requiring extra enforcement by the VM.
+
+**4. Mature Toolchain**: GCC and LLVM both support RISC-V as a first-class target. This means Rust (via `rustc`), C, C++, Zig, and Go (via TinyGo) can all compile to RISC-V with well-tested, production-quality compilers. Developers do not need to learn a new language or rely on an experimental compiler.
+
+**5. The Extension System**: RISC-V uses a modular extension system where each letter adds capabilities. CKB uses `rv64imc` — exactly the extensions it needs without unnecessary complexity. Future extensions can be added to the ISA without breaking compatibility.
+
+**6. Hardware Future**: RISC-V is gaining rapid adoption in silicon (SiFive processors, Alibaba T-Head, RISC-V microcontrollers). Future CKB nodes could potentially execute scripts on native RISC-V hardware, reducing VM overhead to near zero.
+
+### rv64imc: The Three Extensions
+
+CKB-VM implements the `rv64imc` variant of RISC-V. Each letter adds capabilities:
+
+**rv64** — 64-bit registers and address space. All 32 general-purpose registers (x0 through x31) are 64 bits wide. Memory addresses are 64-bit, providing a 4GB+ address space per script. Integer arithmetic operates on 64-bit values natively.
+
+**i** — The base integer instruction set (RV64I). This provides the ~47 core instructions: integer arithmetic (ADD, SUB, AND, OR, XOR), comparison (SLT, SLTU), shifts (SLL, SRL, SRA), loads (LB, LH, LW, LD), stores (SB, SH, SW, SD), conditional branches (BEQ, BNE, BLT, BGE), unconditional jumps (JAL, JALR), and the ECALL instruction (used for syscalls).
+
+**m** — The multiply/divide extension. Adds MUL, MULH, MULHSU, MULHU, DIV, DIVU, REM, and REMU instructions. Without this extension, multiplication would require software emulation (many instructions). CKB scripts frequently need multiplication for arithmetic on token amounts and capacity calculations, so the M extension is included.
+
+**c** — The compressed instruction extension. Provides 16-bit encodings for the most common RISC-V instructions. Normal RISC-V instructions are 32 bits (4 bytes) each. The C extension can encode frequently-used instructions like C.ADD, C.LW, C.SW, C.J in 16 bits. A Rust binary compiled for `riscv64imac` (with the C extension) is typically 25-30% smaller than the same binary without it.
+
+The size reduction from the C extension matters concretely for CKB: script binaries are stored in cells on-chain. Every byte in a cell occupies cell capacity, which costs CKB. A 30% smaller binary means 30% less CKB needed to store the script, reducing the cost to deploy it. The compiler handles C extension usage automatically — you write normal Rust code and the compiler emits compressed instructions where appropriate.
+
+### CKB-VM Execution Model
+
+When CKB validates a transaction, it creates a fresh CKB-VM instance for each script that must run. Here is the complete execution sequence:
+
+1. **Transaction arrives** at a CKB full node
+2. **Structure validation**: the node checks format, verifies no double-spends, checks capacity math
+3. **Script collection**: for each input cell, collect its lock script; for each cell with a type script (inputs and outputs), collect the type script
+4. **Script deduplication into groups**: cells sharing the same complete script (code_hash + hash_type + args) are grouped — the script runs once per group, not once per cell
+5. **For each script group**:
+   - Load the script binary from the referenced cell dependency
+   - Create a fresh VM instance with clean memory (4MB default)
+   - Set up the execution environment with the script binary as an ELF executable
+   - Execute from the ELF entry point
+   - Count cycles for every instruction
+   - If the script returns 0: authorized/valid
+   - If the script returns non-zero: rejected/invalid
+   - If the cycle limit is exceeded: rejected
+6. **All scripts must return 0** for the transaction to be accepted
+
+Each VM instance is completely isolated. Script A cannot read Script B's memory. Scripts cannot communicate except through the transaction structure itself (which both can read via syscalls).
+
+The **cycle limit** is shared across the entire transaction. If a transaction has three scripts totaling 150 million cycles, and the transaction limit is 100 million, the transaction fails even if each individual script is under the limit. This shared limit incentivizes efficient transactions.
+
+### RISC-V Registers
+
+CKB-VM provides all 32 RISC-V general-purpose registers, each 64 bits wide:
+
+| Register | ABI Name | Role |
+|----------|----------|------|
+| x0 | zero | Hardwired to 0 — all writes ignored, all reads return 0 |
+| x1 | ra | Return address (set by JAL/JALR call instructions) |
+| x2 | sp | Stack pointer |
+| x3 | gp | Global pointer |
+| x4 | tp | Thread pointer (unused in CKB-VM — no threads) |
+| x5-x7 | t0-t2 | Temporary registers |
+| x8 | s0/fp | Saved register 0 / frame pointer |
+| x9 | s1 | Saved register 1 |
+| x10-x11 | a0-a1 | Function arguments 0-1 / return values |
+| x12-x17 | a2-a7 | Function arguments 2-7 |
+| x18-x27 | s2-s11 | Saved registers 2-11 |
+| x28-x31 | t3-t6 | Temporary registers 3-6 |
+
+In syscalls, arguments are passed in a0-a6, the syscall number goes in a7, and the return value comes back in a0. This follows the standard RISC-V calling convention, meaning the same register names are used for both regular function calls and syscalls.
+
+### CKB Syscalls
+
+Syscalls are the only channel through which a script can interact with the outside world. They are invoked using the RISC-V `ECALL` instruction with a syscall number in register `a7`.
+
+The `ckb-std` crate wraps all syscalls into ergonomic Rust functions so you rarely need to write the ECALL instructions directly.
+
+#### VM Control
+
+| Syscall | Number | Description |
+|---------|--------|-------------|
+| `exit` | 93 | Terminate script execution immediately with a return code. Calling `exit(0)` succeeds; any other value fails. |
+| `debug` | 2177 | Print a null-terminated debug string to stderr. A no-op in production — the node discards debug output. Used with the `debug!` macro in `ckb-std`. |
+
+#### Transaction Identification
+
+| Syscall | Number | Description |
+|---------|--------|-------------|
+| `load_tx_hash` | 2061 | Load the 32-byte blake2b hash of the current transaction into a buffer. Used by lock scripts as the message to sign. |
+| `load_transaction` | 2051 | Load the complete serialized transaction as a Molecule `Transaction` structure. Use sparingly — transactions can be large. |
+
+#### Script Identity
+
+| Syscall | Number | Description |
+|---------|--------|-------------|
+| `load_script_hash` | 2062 | Load the 32-byte hash of the currently executing script. Useful for preventing scripts from being used in unintended contexts. |
+| `load_script` | 2052 | Load the full `Script` structure (code_hash, hash_type, args) of the currently executing script. Use this to read args that parameterize the script's behavior. |
+
+#### Cell Data Loading
+
+| Syscall | Number | Description |
+|---------|--------|-------------|
+| `load_cell` | 2071 | Load the complete molecule-encoded `CellOutput` (capacity, lock, type) for a cell at an index in the given source. |
+| `load_cell_data` | 2092 | Load the raw data bytes from a cell's data field. The most common syscall in type scripts. |
+| `load_cell_by_field` | 2081 | Load one specific field of a cell (capacity, lock hash, type hash, occupied capacity, etc.) without loading the whole cell. More efficient than `load_cell` when you need only one value. |
+| `load_cell_data_as_code` | 2091 | Load cell data as executable code. Used internally by the VM for loading script binaries. |
+
+#### Input and Output Loading
+
+| Syscall | Number | Description |
+|---------|--------|-------------|
+| `load_input` | 2073 | Load a transaction input's `CellInput` structure (OutPoint + since field). |
+| `load_input_by_field` | 2083 | Load a specific field of an input (OutPoint, since value). |
+| `load_witness` | 2074 | Load a witness value at a given index. Witnesses typically contain signatures, Merkle proofs, or other authorization data. |
+
+#### Block Header Loading
+
+| Syscall | Number | Description |
+|---------|--------|-------------|
+| `load_header` | 2072 | Load a block header from the transaction's header_deps. Used by the Nervos DAO to compute compensation based on block timestamps and epoch numbers. |
+| `load_header_by_field` | 2082 | Load a specific field from a block header (epoch, timestamp, number, etc.). |
+
+#### VM Management (CKB2023+)
+
+These syscalls were introduced in the Ckb2023 hard fork and enable multi-VM script architectures:
+
+| Syscall | Number | Description |
+|---------|--------|-------------|
+| `spawn` | 2601 | Spawn a child VM instance to execute another script binary. The parent can pass arguments and communicate via pipes. Enables modular script libraries. |
+| `pipe` | 2604 | Create a pair of connected file descriptors for inter-VM communication. |
+| `read` | 2605 | Read bytes from a pipe file descriptor. |
+| `write` | 2606 | Write bytes to a pipe file descriptor. |
+| `close` | 2608 | Close a file descriptor. |
+| `wait` | 2603 | Block until a spawned child VM finishes, then read its exit code. |
+| `process_id` | 2602 | Get the current VM's process ID (useful for debugging multi-VM transactions). |
+| `inherited_fd` | 2607 | Get the list of file descriptors inherited from the parent VM. |
+
+#### Introspection
+
+| Syscall | Number | Description |
+|---------|--------|-------------|
+| `current_cycles` | 2042 | Return the current cycle count consumed by this script so far. Useful for debugging performance, not used in production logic. |
+| `vm_version` | 2041 | Return the CKB-VM version (0 for the original VM, 1 for the updated version with spawn support). |
+| `load_block_extension` | 2104 | Load block extension data (available in CKB2023+). |
+
+#### The `source` Parameter
+
+Most cell and input loading syscalls take a `source` parameter specifying which set of cells to access:
+
+| Source | Value | Meaning |
+|--------|-------|---------|
+| `Source::Input` | 1 | All input cells in the transaction |
+| `Source::Output` | 2 | All output cells in the transaction |
+| `Source::CellDep` | 3 | Cell dependencies (scripts, data) |
+| `Source::HeaderDep` | 4 | Block header dependencies |
+| `Source::GroupInput` | 0x0100000000000001 | Input cells with the same script as the running script |
+| `Source::GroupOutput` | 0x0100000000000002 | Output cells with the same script as the running script |
+
+The Group sources are the most important for type scripts. They filter cells to only those sharing the currently executing script, which is how the counter (Lesson 10) and token scripts distinguish "their" cells from other cells in the same transaction.
+
+### Cycle Counting
+
+Every RISC-V instruction executed in CKB-VM consumes a fixed number of **cycles**. The cycle count is a deterministic measure of computational work — it is the same regardless of which hardware the node runs on, which is why cycles (not wall-clock time) are used as the transaction cost metric.
+
+#### Instruction Cycle Costs
+
+| Instruction Category | Examples | Cost |
+|---------------------|---------|------|
+| ALU operations | ADD, SUB, AND, OR, XOR, SLL, SRL | 1 cycle |
+| Compare | SLT, SLTU, SLTI | 1 cycle |
+| Upper immediate | LUI, AUIPC | 1 cycle |
+| Memory load | LB, LH, LW, LD, LBU, LHU, LWU | 3 cycles |
+| Memory store | SB, SH, SW, SD | 3 cycles |
+| Branch | BEQ, BNE, BLT, BGE, BLTU, BGEU | 3 cycles |
+| Jump | JAL, JALR | 3 cycles |
+| Multiply / divide | MUL, MULH, DIV, REM (M extension) | 5 cycles |
+| Syscall | ECALL | 500+ cycles (syscall-dependent) |
+
+The pattern: arithmetic is cheapest (1 cycle), memory and branches cost 3x, multiplication costs 5x, and syscalls have significant fixed overhead (typically 500+ cycles) plus data-proportional cost.
+
+#### The Transaction Cycle Limit
+
+CKB imposes a **per-transaction cycle limit** of approximately **70 billion cycles**. This limit is shared across ALL scripts in the transaction. If the combined cycle consumption of all lock scripts and type scripts exceeds 70 billion, the transaction is rejected.
+
+70 billion cycles is deliberately generous. A secp256k1 ECDSA signature verification costs approximately 1.2 million cycles. The cycle limit accommodates thousands of signature verifications in a single transaction.
+
+To put the limit in context:
+
+| Operation | Approximate Cycles |
+|-----------|-------------------|
+| secp256k1 ECDSA verify | ~1,200,000 |
+| secp256r1 ECDSA verify (WebAuthn) | ~3,000,000 |
+| ed25519 verify | ~2,500,000 |
+| RSA-2048 verify | ~5,000,000 |
+| blake2b-256 of 32 bytes | ~1,600 |
+| blake2b-256 of 1 KB | ~6,500 |
+| SHA-256 of 32 bytes | ~3,000 |
+| SHA-256 of 1 KB | ~15,000 |
+| Molecule deserialization | ~500-2,000 |
+| Simple counter type script (total) | ~500,000 |
+| secp256k1 lock script (total) | ~1,200,000 |
+
+Even complex transactions with a dozen signature verifications and several type script validations will typically use less than 0.01% of the cycle budget.
+
+#### Estimating Cycle Costs
+
+Three methods for measuring script cycle consumption:
+
+**Method 1: ckb-debugger** — Run your script binary offline without connecting to any network. The debugger reports the exact cycle count after execution ends.
+
+```bash
+ckb-debugger --bin target/riscv64imac-unknown-none-elf/release/my-script
+# Output: [DEBUG] ... (debug messages)
+# Run result: Cycles: 847,392
+```
+
+**Method 2: `current_cycles` syscall** — Insert cycle checkpoints inside your script to measure specific code sections. Only useful for debugging and optimization, not for production logic.
+
+```rust
+use ckb_std::syscalls::current_cycles;
+
+let before = current_cycles();
+do_expensive_work();
+let after = current_cycles();
+debug!("Work cost {} cycles", after - before);
+```
+
+**Method 3: `dry_run_transaction` RPC** — Build a complete transaction and call the `dry_run_transaction` RPC endpoint. The node executes all scripts and reports the total cycle count without broadcasting the transaction.
+
+### Optimization Techniques
+
+#### Minimize Syscalls
+
+Each syscall invocation costs at least ~500 cycles of fixed overhead before any data is transferred. Cache syscall results in local variables — never call the same syscall twice for the same data.
+
+```rust
+// Bad: calls the syscall twice
+if load_cell_data(0, Source::GroupOutput).unwrap().len() != 8 {
+    return Err(ERR_INVALID_LENGTH);
+}
+let value = u64::from_le_bytes(load_cell_data(0, Source::GroupOutput).unwrap().try_into().unwrap());
+
+// Good: calls the syscall once
+let data = load_cell_data(0, Source::GroupOutput).unwrap();
+if data.len() != 8 {
+    return Err(ERR_INVALID_LENGTH);
+}
+let value = u64::from_le_bytes(data.try_into().unwrap());
+```
+
+#### Use Partial Loading
+
+Many syscalls support `offset` and `length` parameters for partial reads. If you only need the first 16 bytes of a cell's data (for a token balance), load only 16 bytes instead of the full data blob.
+
+```rust
+// Load only the first 16 bytes of cell data (a Uint128 token balance)
+// The syscall with CKBSyscallPartialFields support:
+let mut balance_bytes = [0u8; 16];
+syscalls::load_cell_data(&mut balance_bytes, 0, 0, Source::GroupInput)?;
+let balance = u128::from_le_bytes(balance_bytes);
+```
+
+#### Choose Efficient Algorithms
+
+Blake2b is approximately 2x faster than SHA-256 in CKB-VM because it was designed for software efficiency. SHA-256 was designed to be efficient with hardware acceleration (SHA-NI instructions on x86), but RISC-V has no SHA-256 hardware support. When you need a hash function and have no interoperability requirement, use blake2b.
+
+Blake2b processes data in 128-byte blocks while SHA-256 uses 64-byte blocks, meaning blake2b needs fewer round function invocations for the same data size.
+
+#### Minimize Binary Size
+
+Smaller binaries load faster and cost less CKB capacity to store on-chain. In your contract's `Cargo.toml`:
+
+```toml
+[profile.release]
+opt-level = "s"      # optimize for size (vs "2" or "3" for speed)
+lto = true           # link-time optimization removes dead code
+codegen-units = 1    # allows more aggressive optimization
+panic = "abort"      # no unwinding support (shrinks binary, no-std safe)
+strip = true         # strip debug symbols in release builds
+```
+
+These settings together typically reduce binary size by 50-70% compared to a default release build.
+
+#### Return Early
+
+Check the cheapest conditions first. A length check on cell data costs a few cycles; hashing that data costs thousands. Reject invalid transactions before doing expensive work.
+
+```rust
+// Cheap check first (just array indexing)
+if data.len() != EXPECTED_SIZE {
+    return Err(ERROR_LENGTH);
+}
+
+// More expensive check only if the cheap check passes
+let hash = blake2b_256(&data);
+if hash != expected_hash {
+    return Err(ERROR_HASH_MISMATCH);
+}
+```
+
+#### Leverage Script Groups
+
+Script groups run once per group, not once per cell. A transaction with ten inputs from the same address runs the lock script once, not ten times. Design your scripts to handle groups efficiently using `Source::GroupInput` and `Source::GroupOutput`, and perform batch validation inside a single script execution rather than splitting into multiple transactions.
+
+#### Avoid Unnecessary Allocation
+
+In `no_std` environments with a bump allocator, allocations are cheap but deallocation is not (bump allocators do not reclaim memory). Use stack-allocated fixed-size arrays when possible:
+
+```rust
+// Bad: heap allocation for a small fixed-size buffer
+let data: Vec<u8> = load_cell_data(0, Source::GroupOutput)?;
+
+// Better: stack-allocated when size is known and small
+let mut buf = [0u8; 8];
+syscalls::load_cell_data(&mut buf, 0, 0, Source::GroupOutput)?;
+```
+
+### Cryptographic Freedom
+
+Most blockchains hardcode specific cryptographic algorithms into their protocol:
+- Bitcoin: SHA-256 + RIPEMD-160 for addresses, secp256k1 ECDSA for signatures
+- Ethereum: Keccak-256 for hashing, secp256k1 ECDSA for signatures (via ecrecover precompile)
+
+Adding a new algorithm to these systems requires a protocol upgrade (hard fork). Supporting post-quantum algorithms would require replacing core protocol primitives.
+
+CKB takes a fundamentally different approach: **any algorithm that can be compiled to RISC-V can run on CKB-VM**. There are no hardcoded cryptographic algorithms in the VM itself. Signature verification is not a VM opcode — it is a regular lock script that calls `load_tx_hash` to get the message and `load_witness` to get the signature, then runs the algorithm in Rust code.
+
+This enables:
+
+- **secp256r1 (P-256)**: Used by WebAuthn/Passkeys. A lock script using secp256r1 allows users to authenticate with their device's biometric hardware (TouchID, Windows Hello).
+
+- **Ed25519**: Used by Solana, Cardano, and many other ecosystems. A CKB lock script using Ed25519 allows wallets from those ecosystems to control CKB cells directly.
+
+- **Schnorr signatures**: Used by Bitcoin Taproot. Enables Bitcoin-compatible multisig and threshold signatures on CKB.
+
+- **BLS signatures**: Used by Ethereum 2.0 consensus. BLS supports signature aggregation — many signers can produce a single compact proof.
+
+- **RSA**: For integration with legacy systems, enterprise identity (X.509 certificates), or hardware security modules.
+
+- **Post-quantum algorithms (Dilithium, Kyber, FALCON)**: NIST-standardized post-quantum algorithms can be compiled to RISC-V and deployed as CKB lock scripts today. CKB is post-quantum ready without any protocol changes.
+
+This is what makes **Omnilock** possible: a single lock script that supports multiple authentication methods (secp256k1, secp256r1, multisig, Ethereum-compatible signatures) by dispatching to different verification code paths based on the script args.
+
+### Any Language That Compiles to RISC-V
+
+Because CKB-VM only sees RISC-V machine code, any language with a RISC-V compilation target can be used to write CKB scripts:
+
+| Language | Compilation Path | Status |
+|----------|-----------------|--------|
+| **Rust** | `rustc` with `riscv64imac-unknown-none-elf` target | Most popular; `ckb-std` provides ergonomic bindings |
+| **C / C++** | `riscv64-unknown-elf-gcc` or Clang with RISC-V target | Widely used; many existing crypto libraries work directly |
+| **Zig** | `zig build-exe -target riscv64-freestanding-none` | First-class RISC-V support, growing ecosystem |
+| **Go** | TinyGo with RISC-V backend | Community-maintained; more limited than Rust/C |
+| **JavaScript** | Embed QuickJS (a JS engine) compiled to RISC-V | Possible but expensive in cycles |
+| **Lua** | Embed a Lua interpreter compiled to RISC-V | Used in some experimental projects |
+
+The CKB-VM does not know or care which language produced the binary. It sees only ELF-format RISC-V machine code. This language agnosticism is another expression of CKB's openness philosophy.
+
+## Step-by-Step Project Walkthrough
+
+### Project Structure
+
+```
+lessons/12-ckb-vm-deep-dive/
+  contracts/
+    simple-math/
+      src/main.rs          — Cycle counting demo across operation types
+    crypto-benchmark/
+      src/main.rs          — Blake2b vs SHA-256 comparison + crypto freedom
+  scripts/
+    src/
+      index.ts             — RISC-V overview, syscall reference, cycle guide
+      syscalls.ts          — Detailed syscall documentation
+```
+
+### Contract 1: `contracts/simple-math/src/main.rs`
+
+This contract demonstrates how different operation types in CKB-VM consume different numbers of cycles. It is structured as five sections, each measuring a different kind of work:
+
+**Section 1 — Arithmetic**: Simple ALU operations (add, multiply, divide, shift, XOR). Each compiles to 1-5 RISC-V instructions. Expected cost: under 50 cycles for all operations combined.
+
+**Section 2 — Loops**: The same addition repeated at different iteration counts (100, 1000, 10000). Demonstrates that cycle cost scales linearly with iteration count. Each loop iteration costs approximately 5 cycles (1 compare + 1 add + 1 increment + overhead). Rule of thumb: minimize loops in hot paths.
+
+```rust
+const LOOP_ITERATIONS_SMALL: u64 = 100;
+const LOOP_ITERATIONS_MEDIUM: u64 = 1_000;
+const LOOP_ITERATIONS_LARGE: u64 = 10_000;
+
+fn loop_demo(iterations: u64) -> u64 {
+    let mut accumulator: u64 = 0;
+    let mut i: u64 = 0;
+    while i < iterations {
+        accumulator = accumulator.wrapping_add(i);
+        i += 1;
+    }
+    accumulator
+}
+```
+
+When you run this under `ckb-debugger`, you will observe that going from 1000 to 10000 iterations increases the cycle count by approximately 10x. The linear relationship holds precisely.
+
+**Section 3 — Memory Allocation**: Allocating and filling buffers of 64, 1024, and 4096 bytes. Each byte written is a store instruction (~3 cycles). Demonstrates that memory cost is proportional to bytes written.
+
+**Section 4 — Blake2b Hashing**: Hashing 32 bytes, 256 bytes, and 1024 bytes. Blake2b processes 128-byte blocks. The cycle cost formula: approximately 200 (initialization) + ⌈N/128⌉ × 700 (per block) + 700 (finalization). For 32 bytes: ~1600 cycles. For 1 KB: ~6500 cycles.
+
+**Section 5 — Byte Comparison**: Comparing arrays of 32, 256, and 1024 bytes. Demonstrates early-exit behavior: when arrays differ at byte 0, the function returns after ~10 cycles; when they match completely, it costs ~130 cycles per 32 bytes.
+
+Running this under `ckb-debugger --bin simple-math`:
+
+```bash
+cd lessons/12-ckb-vm-deep-dive/contracts/simple-math
+cargo build --release --target riscv64imac-unknown-none-elf
+ckb-debugger --bin target/riscv64imac-unknown-none-elf/release/simple-math
+```
+
+Observe the total cycle count and correlate with the debug messages to understand which section consumed the most cycles.
+
+### Contract 2: `contracts/crypto-benchmark/src/main.rs`
+
+This contract demonstrates CKB's cryptographic freedom by implementing both blake2b (CKB's native function) and SHA-256 (Bitcoin's hash function) in the same script:
+
+**Blake2b section**: Uses the `blake2b-ref` crate, which is optimized for RISC-V. Hashes test data at three sizes and chains 10 hash rounds to show the Merkle-tree use case.
+
+**SHA-256 section**: A complete from-scratch SHA-256 implementation following FIPS 180-4, with the full padding algorithm, message schedule expansion, and 64 rounds of compression. This is the same algorithm Bitcoin uses — running natively on CKB-VM.
+
+```rust
+fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut h = SHA256_H;  // initial hash values
+    // ... padding, block processing, 64 compression rounds ...
+}
+```
+
+**Key observation**: When run under `ckb-debugger`, you will see that blake2b hashes 32 bytes in approximately 1600 cycles while SHA-256 requires approximately 3000 cycles for the same data. The ratio increases for larger inputs because blake2b's 128-byte block size means fewer round-function calls per byte.
+
+**Signature verification section**: Documents the typical cycle costs for different signature algorithms. secp256k1 ECDSA verification (the default CKB lock) costs approximately 1.2 million cycles. secp256r1 costs about 3 million cycles. These values fit comfortably within the 70 billion cycle limit even for complex multi-signature transactions.
+
+### The TypeScript Demo: `scripts/src/index.ts`
+
+The TypeScript demo provides an off-chain companion to the on-chain contracts. It covers:
+
+- A complete RISC-V register table with ABI names and roles
+- All instruction categories with cycle costs
+- The full CKB-VM execution model step by step
+- Every syscall organized by category (VM control, transaction, cell data, input/output, headers, VM management, introspection)
+- The Source parameter values (Input=1, Output=2, CellDep=3, HeaderDep=4, GroupInput=special, GroupOutput=special)
+- Cycle cost tables for common operations
+- Optimization techniques with concrete examples
+- Live connection to the CKB testnet to query chain state and demonstrate script hash lookups
+
+Run with:
+
+```bash
+cd lessons/12-ckb-vm-deep-dive/scripts
+npm install
+npx tsx src/index.ts
+```
+
+## Running the Code
+
+### Build Simple Math Contract
+
+```bash
+cd lessons/12-ckb-vm-deep-dive/contracts/simple-math
+rustup target add riscv64imac-unknown-none-elf
+cargo build --release --target riscv64imac-unknown-none-elf
+ckb-debugger --bin target/riscv64imac-unknown-none-elf/release/simple-math
+```
+
+### Build Crypto Benchmark Contract
+
+```bash
+cd lessons/12-ckb-vm-deep-dive/contracts/crypto-benchmark
+cargo build --release --target riscv64imac-unknown-none-elf
+ckb-debugger --bin target/riscv64imac-unknown-none-elf/release/crypto-benchmark
+```
+
+### Run TypeScript VM Analysis
+
+```bash
+cd lessons/12-ckb-vm-deep-dive/scripts
+npm install
+npx tsx src/index.ts
+```
+
+## Common Patterns and Gotchas
+
+**no_std requirement**: CKB scripts always run in a bare-metal environment. You must use `#![no_std]` and provide a memory allocator if you need heap allocation. The `ckb_std::default_alloc!()` macro sets up a simple bump allocator.
+
+**IndexOutOfBound is not an error**: When iterating over cells with syscalls, `SysError::IndexOutOfBound` is the signal that there are no more items. It is not a failure condition. Always break out of loops cleanly when you receive it.
+
+**Load_cell_data returns Vec, not slice**: `high_level::load_cell_data` allocates and returns a `Vec<u8>`. For tiny scripts you might want to use the raw syscall with a pre-allocated buffer to avoid the allocation.
+
+**Script groups vs all cells**: `Source::GroupInput` and `Source::GroupOutput` filter to cells sharing your script. `Source::Input` and `Source::Output` access ALL cells. Type scripts almost always want the Group sources to avoid accidentally operating on unrelated cells.
+
+**Cycles are consumed by the binary, not the Rust source**: If you measure cycles using `ckb-debugger`, you are measuring the actual RISC-V instructions in the compiled binary. A `debug!` call in debug mode and release mode consume different cycles. Always benchmark release builds.
+
+## Summary
+
+In this lesson, you learned:
+
+- **CKB-VM** is a pure software RISC-V implementation written in Rust, running scripts in a deterministic sandbox
+- **RISC-V** was chosen for its open standard, simplicity (~47 base instructions), determinism, and mature toolchain
+- **rv64imc**: 64-bit base integers (rv64i) + multiply/divide (m) + compressed instructions (c)
+- **The C extension** reduces binary size by ~25-30%, directly saving on-chain storage costs
+- **Scripts execute** in fresh, isolated VM instances created per script group; all return 0 to succeed
+- **Syscalls** are the only I/O available — load_tx_hash, load_script, load_cell_data, load_witness, and many more
+- **Cycle costs**: ALU operations cost 1, memory/branches cost 3, multiply costs 5, syscalls cost 500+
+- **Transaction cycle limit** is ~70 billion, shared across all scripts — generous but must be respected
+- **Optimization** focuses on minimizing syscalls, choosing efficient algorithms, using early exit, and keeping binaries small
+- **Cryptographic freedom**: any algorithm compilable to RISC-V works on CKB — SHA-256, Ed25519, secp256r1, post-quantum, and more
+- **Any language** with a RISC-V target can write CKB scripts: Rust, C, Zig, Go (TinyGo), and others
+
+## What's Next
+
+In the next lesson, you will build your first **xUDT token** — CKB's extensible user-defined token standard. xUDT uses everything you have learned: the Cell Model for storing balances, type scripts for enforcing supply conservation, Molecule for encoding token metadata, and CKB-VM for running the validation logic. This is where the building blocks come together into a real application.

@@ -1,0 +1,57 @@
+[package]
+# -------------------------------------------------------------------
+# CKB Simple Math - Cycle Counting Demo
+# -------------------------------------------------------------------
+# This crate demonstrates how different operations consume different
+# numbers of execution cycles in CKB-VM. CKB-VM is a RISC-V virtual
+# machine that meters every instruction via a cycle counter. Each
+# transaction has a maximum cycle limit (currently ~70 billion cycles
+# on mainnet), and exceeding it causes the transaction to fail.
+#
+# Understanding cycle costs is critical for writing efficient on-chain
+# scripts. This script performs several categories of operations and
+# uses the `ckb_debug!` macro to print messages at each stage, so you
+# can observe relative costs by examining the debug output when running
+# under ckb-debugger.
+#
+# Operations tested:
+#   1. Simple arithmetic (addition, multiplication)
+#   2. Loop iterations (linear scaling)
+#   3. Memory allocation (heap usage in no_std)
+#   4. Blake2b hashing (CKB's native hash function)
+#   5. Byte manipulation (copying, comparing)
+# -------------------------------------------------------------------
+name = "simple-math"
+version = "0.1.0"
+edition = "2021"
+
+# -------------------------------------------------------------------
+# Dependencies
+# -------------------------------------------------------------------
+# ckb-std: Provides the CKB script runtime including:
+#   - `entry!` macro for the program entry point
+#   - `default_alloc!` macro for the memory allocator
+#   - `debug!` macro for printing debug messages (visible in ckb-debugger)
+#   - Syscall wrappers for interacting with CKB-VM
+#   - blake2b hashing via the `ckb_hash` module
+# -------------------------------------------------------------------
+[dependencies]
+ckb-std = "0.16"
+
+# -------------------------------------------------------------------
+# Profile: Release Build
+# -------------------------------------------------------------------
+# CKB scripts run in a constrained environment. These settings produce
+# the smallest possible binary:
+#   - opt-level = "s": Optimize for binary size (fewer cycles per op too)
+#   - lto = true: Link-Time Optimization removes unused code
+#   - codegen-units = 1: Single codegen unit for maximum optimization
+#   - panic = "abort": No stack unwinding (saves ~10KB in binary size)
+#   - strip = true: Remove symbol tables and debug info
+# -------------------------------------------------------------------
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

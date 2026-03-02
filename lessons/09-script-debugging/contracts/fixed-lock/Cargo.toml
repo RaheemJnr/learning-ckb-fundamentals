@@ -1,0 +1,18 @@
+[package]
+name = "fixed-lock"
+version = "0.1.0"
+edition = "2021"
+
+# This is the corrected version of the buggy-lock script.
+# Each fix is annotated with a comment explaining what was wrong
+# and why the corrected code works.
+
+[dependencies]
+ckb-std = "0.16"
+
+[profile.release]
+overflow-checks = true
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"

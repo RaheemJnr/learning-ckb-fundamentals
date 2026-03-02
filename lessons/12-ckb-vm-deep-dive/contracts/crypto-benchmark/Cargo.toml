@@ -1,0 +1,47 @@
+[package]
+# -------------------------------------------------------------------
+# CKB Crypto Benchmark - Comparing Cryptographic Operations
+# -------------------------------------------------------------------
+# This crate benchmarks different cryptographic operations inside
+# CKB-VM to demonstrate one of CKB's key features: cryptographic
+# freedom.
+#
+# Unlike Ethereum (which only natively supports keccak256 and ecrecover),
+# CKB scripts can use ANY cryptographic algorithm — blake2b, sha256,
+# secp256k1, ed25519, BLS, RSA, or even post-quantum algorithms. This
+# is because CKB-VM executes general-purpose RISC-V code, so any
+# algorithm that can be compiled to RISC-V can be used on-chain.
+#
+# This script compares:
+#   1. Blake2b hashing (CKB's default, ~1600 cycles for 32 bytes)
+#   2. SHA-256 hashing (Bitcoin/Ethereum standard, implemented in software)
+#   3. Secp256k1 verification (using CKB's built-in syscall)
+#
+# The key insight: blake2b is much cheaper in CKB-VM because CKB was
+# designed around it, while SHA-256 must be implemented in software
+# (no hardware acceleration in RISC-V). Secp256k1 verification uses
+# a syscall that runs native code outside the VM, making it very fast.
+# -------------------------------------------------------------------
+name = "crypto-benchmark"
+version = "0.1.0"
+edition = "2021"
+
+# -------------------------------------------------------------------
+# Dependencies
+# -------------------------------------------------------------------
+# ckb-std: Provides blake2b hashing, syscalls (including secp256k1
+#          signature verification via exec/spawn), debug output,
+#          and the script runtime.
+# -------------------------------------------------------------------
+[dependencies]
+ckb-std = "0.16"
+
+# -------------------------------------------------------------------
+# Release Profile
+# -------------------------------------------------------------------
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

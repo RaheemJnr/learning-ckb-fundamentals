@@ -1,0 +1,15 @@
+{
+  "name": "07-script-basics",
+  "version": "1.0.0",
+  "description": "Lesson 7: Lock Scripts & Type Scripts — understand the script execution model that powers CKB",
+  "private": true,
+  "scripts": {
+    "start": "npx tsx src/index.ts",
+    "dev": "npx tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@ckb-ccc/core": "^1.2.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,62 @@
+[package]
+# -------------------------------------------------------------------
+# CKB Counter Type Script
+# -------------------------------------------------------------------
+# This crate contains an on-chain TYPE SCRIPT for the Nervos CKB
+# blockchain. When compiled, it produces a RISC-V binary that runs
+# inside the CKB-VM (CKB's virtual machine).
+#
+# TYPE SCRIPTS vs LOCK SCRIPTS:
+#   - Lock scripts control WHO can spend a cell (authorization).
+#   - Type scripts control WHAT a cell can contain (validation).
+#
+# This type script enforces a counter pattern:
+#   - When a cell with this type is CREATED, the data must be 0.
+#   - When a cell with this type is UPDATED, the new data must be
+#     the old data + 1 (increment by exactly 1).
+#   - When a cell with this type is DESTROYED, it is always allowed.
+#
+# The counter is a simple state machine that demonstrates how type
+# scripts enforce state transition rules on CKB.
+# -------------------------------------------------------------------
+name = "counter"
+version = "0.1.0"
+edition = "2021"
+
+# -------------------------------------------------------------------
+# Dependencies
+# -------------------------------------------------------------------
+# ckb-std: The standard library for CKB script development.
+#   - Provides syscalls to interact with CKB-VM:
+#     * load_cell_data: read the data stored in a cell
+#     * load_script: read the currently executing script
+#     * QueryIter: iterate over inputs/outputs by group
+#   - Provides Source enum: Input, Output, GroupInput, GroupOutput
+#   - Provides the entry point macro for no_std environments
+#
+# Since CKB scripts run in a bare-metal RISC-V environment (no OS),
+# we cannot use Rust's standard library. ckb-std fills that gap.
+# -------------------------------------------------------------------
+[dependencies]
+ckb-std = "0.16"
+
+# -------------------------------------------------------------------
+# Profile: Release Build
+# -------------------------------------------------------------------
+# CKB scripts should be as small as possible because:
+#   1. Larger scripts cost more CKB to store on-chain (capacity)
+#   2. Larger scripts consume more execution cycles in CKB-VM
+#
+# These settings optimize for minimal binary size:
+#   - opt-level = "s": Optimize for size rather than speed
+#   - lto = true: Link-Time Optimization eliminates dead code
+#   - codegen-units = 1: Single codegen unit allows better optimization
+#   - panic = "abort": No unwinding support (saves binary size)
+#   - strip = true: Remove debug symbols from the final binary
+# -------------------------------------------------------------------
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,101 @@
+{
+  "lessonId": 7,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What is the fundamental difference between CKB scripts and Ethereum smart contracts?",
+      "options": [
+        "CKB scripts are written in Solidity while Ethereum contracts use RISC-V",
+        "CKB scripts are validators that approve or reject state transitions, while Ethereum contracts execute logic and modify state directly",
+        "CKB scripts can only run on mainnet, while Ethereum contracts work on any network",
+        "CKB scripts run off-chain while Ethereum contracts run on-chain"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB scripts are pure validators. A transaction proposes a complete state transition (inputs to outputs), and scripts simply return success (0) or failure (non-zero). They never modify state directly. Ethereum smart contracts, in contrast, execute logic and produce state changes themselves. This validator model enables determinism, parallelism, and off-chain computation."
+    },
+    {
+      "id": 2,
+      "question": "When do lock scripts and type scripts execute during transaction verification?",
+      "options": [
+        "Lock scripts run on both inputs and outputs; type scripts run only on inputs",
+        "Lock scripts run only on output cells; type scripts run only on input cells",
+        "Lock scripts run only on input cells; type scripts run on both input and output cells",
+        "Both lock scripts and type scripts run on both input and output cells"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Lock scripts run only on input cells because they verify spending authorization — you need to prove you can spend existing cells. Type scripts run on both input and output cells because they validate the complete state transition — ensuring new cells are created correctly (outputs) and old cells are consumed correctly (inputs)."
+    },
+    {
+      "id": 3,
+      "question": "What are the three fields that make up every CKB script?",
+      "options": [
+        "address, signature, and nonce",
+        "code_hash, hash_type, and args",
+        "sender, receiver, and amount",
+        "program_id, version, and parameters"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Every CKB script has exactly three fields: code_hash (a 32-byte hash identifying which on-chain program to run), hash_type (determines how code_hash references the program binary), and args (arbitrary bytes passed as arguments to the script, such as a pubkey hash for signature verification)."
+    },
+    {
+      "id": 4,
+      "question": "What is the difference between hash_type 'data2' and hash_type 'type'?",
+      "options": [
+        "'data2' is faster to execute than 'type'",
+        "'data2' pins the script to an exact binary via blake2b(cell_data), while 'type' allows upgrades by referencing blake2b(type_script_of_code_cell)",
+        "'data2' runs on VM v0, while 'type' runs on VM v2",
+        "'data2' is used for lock scripts and 'type' is used for type scripts"
+      ],
+      "correctAnswer": 1,
+      "explanation": "With hash_type 'data2', code_hash equals blake2b(cell_data) — it is pinned to an exact binary. If the code changes even one byte, the hash changes and the reference breaks. With hash_type 'type', code_hash equals blake2b(type_script_on_code_cell) — the type script acts as a stable identifier, and the actual binary can be upgraded by deploying to a new cell with the same type script. Both use CKB-VM v2."
+    },
+    {
+      "id": 5,
+      "question": "What are script groups and why does CKB use them?",
+      "options": [
+        "Script groups are collections of different scripts that run sequentially for security",
+        "Script groups combine cells with identical scripts (same code_hash, hash_type, args) so the script runs once for the entire group, improving efficiency",
+        "Script groups are administrative categories for organizing deployed scripts on-chain",
+        "Script groups are batches of transactions that share the same lock script"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB groups cells by their complete script identity (code_hash + hash_type + args) and runs each unique script only once per group. For example, spending 10 cells from the same address only requires one signature verification instead of ten. This improves performance and also allows scripts to validate aggregate properties across multiple cells, such as ensuring total token amounts are conserved."
+    },
+    {
+      "id": 6,
+      "question": "What is the purpose of cell deps in a CKB transaction?",
+      "options": [
+        "Cell deps are the cells that will be consumed as transaction inputs",
+        "Cell deps reference cells containing the RISC-V binary code for scripts used in the transaction",
+        "Cell deps are optional metadata attached to transaction outputs",
+        "Cell deps track which cells depend on the transaction for their existence"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Cell deps (cell dependencies) are references in a transaction that tell CKB where to find the actual RISC-V binary code for each script that will be executed. Script code is stored as data in regular cells, and cell deps point CKB to those cells. Without the correct cell deps, CKB cannot find the code and the transaction is rejected."
+    },
+    {
+      "id": 7,
+      "question": "What does the SECP256K1-BLAKE160 lock script's 'args' field contain?",
+      "options": [
+        "The full 33-byte compressed secp256k1 public key",
+        "The transaction hash that created the cell",
+        "A 20-byte blake160 hash of the owner's secp256k1 public key",
+        "The private key encrypted with AES-256"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The SECP256K1-BLAKE160 lock script stores a 20-byte blake160 hash of the owner's public key in the args field. To spend a cell with this lock script, the owner signs the transaction with their private key, and the script verifies that the signature matches the pubkey hash stored in args. This is analogous to Bitcoin's P2PKH (Pay-to-Public-Key-Hash)."
+    },
+    {
+      "id": 8,
+      "question": "What is the difference between dep_type 'code' and dep_type 'dep_group' in a cell dep?",
+      "options": [
+        "'code' references compiled code while 'dep_group' references source code",
+        "'code' means the referenced cell's data IS the script binary; 'dep_group' means the cell's data contains a list of OutPoints that each reference cells with script code",
+        "'code' is used for lock scripts and 'dep_group' is used for type scripts",
+        "'code' runs scripts synchronously while 'dep_group' runs them in parallel"
+      ],
+      "correctAnswer": 1,
+      "explanation": "With dep_type 'code', the referenced cell's data field directly contains the RISC-V script binary. With dep_type 'dep_group', the cell's data contains a serialized list of OutPoints, each pointing to another cell whose data is a script binary. dep_group is a convenience for bundling multiple related scripts — for example, SECP256K1-BLAKE160 uses a dep_group that bundles both the secp256k1 library and the lock script logic."
+    }
+  ]
+}

@@ -1,0 +1,101 @@
+{
+  "lessonId": 9,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What tool is used to run CKB scripts locally against mock transactions for debugging, and how is it installed?",
+      "options": [
+        "ckb-vm-runner, installed via `npm install -g ckb-vm-runner`",
+        "CKB-Debugger, installed via `cargo install ckb-debugger` or downloaded from GitHub releases at nervosnetwork/ckb-standalone-debugger",
+        "ckb-sandbox, installed by cloning the Nervos repository and running `make install`",
+        "The standard Rust debugger `gdb` with a CKB-VM plugin, installed via `rustup component add gdb`"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB-Debugger (also known as ckb-standalone-debugger) is the official tool for running CKB scripts offline. Install it with `cargo install ckb-debugger` if you have the Rust toolchain, or download a prebuilt binary from https://github.com/nervosnetwork/ckb-standalone-debugger/releases. It simulates the CKB-VM environment locally, accepting a mock transaction JSON file and producing the script's exit code along with any `ckb_debug!` output on stderr."
+    },
+    {
+      "id": 2,
+      "question": "What is the difference between a CKB-VM error code (like -1) and a script-level error code (like 3)?",
+      "options": [
+        "VM error codes are fatal and crash the node, while script-level codes are informational and do not reject the transaction",
+        "VM error codes are always negative and come from CKB-VM itself when a syscall fails (e.g., accessing a non-existent index); script-level codes are positive and are returned by your script code to indicate specific rejection reasons",
+        "VM error codes come from the off-chain SDK, while script-level codes come from the on-chain RISC-V binary",
+        "There is no difference — all non-zero exit codes are treated identically by the CKB node"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB uses two distinct ranges for exit codes. Negative codes (-1, -2, -3, etc.) are returned by the CKB-VM itself when a syscall cannot complete — for example, -1 (INDEX_OUT_OF_BOUND) means the script tried to access an index that does not exist in the transaction. These indicate infrastructure problems. Positive codes (1, 2, 3, etc.) are returned by your own script's `program_entry()` function to communicate specific rejection reasons. When debugging, identifying whether the code is negative or positive immediately tells you where to look — VM documentation or your own error constant definitions."
+    },
+    {
+      "id": 3,
+      "question": "What does exit code -1 (INDEX_OUT_OF_BOUND) most commonly indicate in a CKB lock script?",
+      "options": [
+        "The script binary is larger than the maximum allowed size for a code cell",
+        "The script tried to access a witness, input, output, or cell dep at an index that does not exist in the transaction — most commonly from loading a witness at the wrong index",
+        "The script's args field contains an array index that exceeds the args length",
+        "The transaction has too many inputs for the script to process within the cycle limit"
+      ],
+      "correctAnswer": 1,
+      "explanation": "INDEX_OUT_OF_BOUND (-1) is one of the most common VM errors in CKB script development. It occurs when a syscall like `load_witness()`, `load_cell_data()`, or `load_input()` is called with an index that exceeds the available items. For lock scripts, the most common cause is loading the witness at index 1 when the transaction only has one witness (at index 0). This is exactly Bug #2 in the buggy-lock script: `load_witness(1, Source::Input)` instead of `load_witness(0, Source::Input)`. Off-by-one errors in loop counters that iterate over inputs or outputs can also produce this error."
+    },
+    {
+      "id": 4,
+      "question": "How does the `ckb_debug!` macro work, and what happens to its output on a real CKB node versus under CKB-Debugger?",
+      "options": [
+        "`ckb_debug!` writes to a log file in the CKB node's data directory on both real nodes and the debugger",
+        "`ckb_debug!` calls a special debug syscall; under CKB-Debugger the output appears on stderr, while on a real CKB node the output is discarded (though the cycles for the syscall call are still consumed)",
+        "`ckb_debug!` is compiled out entirely in release builds and only exists in debug builds — it has zero effect on-chain",
+        "`ckb_debug!` sends messages to a remote monitoring service configured in the CKB node's settings"
+      ],
+      "correctAnswer": 1,
+      "explanation": "`ckb_debug!` is provided by `ckb-std` and uses a dedicated debug syscall in CKB-VM. Under CKB-Debugger, this syscall causes the message to be printed to stderr — you can see the output in your terminal alongside the exit code and cycle count. On a real CKB node (mainnet or testnet), the debug syscall is accepted but its output is silently discarded; the node does not log it anywhere. However, the cycles for executing the syscall are still consumed, which is why you may want to remove `ckb_debug!` calls from scripts with tight cycle budgets. For development, the overhead is negligible — approximately 2,000 cycles per call."
+    },
+    {
+      "id": 5,
+      "question": "In the buggy-lock script, Bug #3 compares only 20 bytes of a 32-byte blake2b hash. Why is this classified as a security vulnerability rather than just a functional bug?",
+      "options": [
+        "It is not a vulnerability — comparing 20 bytes of a 32-byte hash is identical in security to comparing all 32 bytes",
+        "It makes the script return the wrong exit code, which breaks error reporting in the SDK",
+        "By checking only 20 of 32 bytes, 12 bytes (96 bits) of the hash are unchecked. An attacker needs to find a preimage whose first 20 bytes of hash match the target — a weaker requirement than a full collision, reducing the effective security from 256 bits to 160 bits",
+        "It causes integer overflow in the comparison loop that corrupts the result stack"
+      ],
+      "correctAnswer": 2,
+      "explanation": "A blake2b-256 hash is 32 bytes and its security derives from all 256 bits being checked. When you compare only 20 bytes (160 bits), you leave 12 bytes (96 bits) unchecked. This means an attacker does not need to find a preimage that produces the full 32-byte hash — they only need a preimage whose hash matches on the first 20 bytes. This partial collision requirement is weaker than a full collision and therefore easier to satisfy. The danger is that this bug is invisible in functional testing: tests with correct preimages pass, and tests with clearly wrong preimages also fail correctly (since different preimages typically differ in the first 20 bytes too). Only an adversarially crafted preimage designed to collide on the first 20 bytes specifically would expose the vulnerability."
+    },
+    {
+      "id": 6,
+      "question": "What is the correct 5-step debugging methodology for CKB scripts?",
+      "options": [
+        "Install debugger, compile script, deploy to testnet, observe failure, rollback",
+        "Read the Error, Reproduce Locally, Add Debug Prints, Isolate the Bug, Fix and Verify",
+        "Check the docs, rewrite the script, deploy to devnet, test all paths, deploy to mainnet",
+        "Search GitHub issues, download a similar working script, adapt it, test, deploy"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The systematic 5-step process is: (1) Read the Error — identify which script failed (lock vs type, which input/output) and what the exit code means (VM error vs script error); (2) Reproduce Locally — export the transaction to JSON and confirm you get the same exit code in CKB-Debugger before making any changes; (3) Add Debug Prints — insert `ckb_debug!()` calls at entry points, data loads, and branch points to trace execution; (4) Isolate the Bug — find the specific line where actual behavior diverges from expected, checking lengths, indices, comparison ranges, and return paths; (5) Fix and Verify — apply the minimal fix and test both success cases (should pass) and failure cases (should still fail with the correct code). Skipping step 2 means you may fix a different issue than what caused the original failure."
+    },
+    {
+      "id": 7,
+      "question": "Why is negative testing (testing failure cases) critical for CKB lock scripts, as demonstrated by Bug #4 in the buggy-lock script?",
+      "options": [
+        "Negative testing is not required for CKB scripts because the VM automatically rejects scripts that have incorrect logic",
+        "Bug #4 returns 0 (success) even when the hash comparison fails, making the lock accept any preimage. This bug is invisible to positive tests (which only test the correct preimage) but immediately caught by providing a wrong preimage",
+        "Negative testing is only needed for type scripts, not lock scripts, because lock scripts cannot damage on-chain state",
+        "Negative tests are required only for scripts that handle CKB capacity transfers, not for hash-based authentication scripts"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Bug #4 is the most dangerous bug in the set: after the hash comparison fails, the script falls through to `return 0`, signaling success. This turns the lock script into an 'anyone can spend' lock — any transaction with any witness data (or even no witness) can consume the locked cell. Positive testing (testing with the correct preimage) never reaches this code path because the early `return 0` on line 181 exits first. Only testing with an incorrect preimage would reveal that the script returns 0 when it should return ERROR_HASH_MISMATCH. Every lock script should be tested with deliberately wrong credentials to confirm it actually rejects unauthorized access."
+    },
+    {
+      "id": 8,
+      "question": "When using CKB-Debugger with the `--bin` flag, what advantage does it provide over running the script from the cell deps in the mock transaction?",
+      "options": [
+        "`--bin` skips all script validation entirely, making it faster but less accurate",
+        "`--bin` allows you to run a locally compiled debug build of your script binary directly, enabling fast iteration without re-deploying to a chain or updating the mock transaction's cell deps every time you recompile",
+        "`--bin` enables network access for the script so it can make RPC calls during debugging",
+        "`--bin` increases the default cycle limit to unlimited, removing cycle constraints during testing"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Without `--bin`, CKB-Debugger looks up the script binary by resolving the code_hash from the mock transaction's cell deps — this requires your mock transaction to include the deployed binary data in the cell_deps mock_info section. With `--bin <path>`, you provide the path to a locally compiled binary directly. The debugger uses that binary instead of resolving from cell deps. This means you can recompile with `cargo build`, then immediately run the new binary with the same transaction JSON file without updating anything else. This is the standard workflow during active development: edit source, compile, run debugger, read debug output, repeat. The `--bin` build will typically be a debug build (not `--release`) to preserve debug symbols and get faster compilation."
+    }
+  ]
+}

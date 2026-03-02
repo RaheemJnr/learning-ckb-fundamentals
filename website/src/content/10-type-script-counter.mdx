@@ -1,0 +1,435 @@
+# Your First Type Script (Rust)
+
+## Overview
+
+In this lesson, you will build your first **type script** on CKB: a counter that can only be incremented by 1 per transaction. Type scripts are one of the two script types in CKB's Cell Model, and they are responsible for enforcing **data integrity rules** — controlling what a cell can contain and how its data can change over time.
+
+By the end of this lesson, you will be able to:
+
+- Explain what type scripts are and how they differ from lock scripts
+- Write a type script in Rust using the `ckb_std` library
+- Implement a state machine pattern (the counter) on-chain
+- Build transactions that create, update, and destroy cells with type scripts
+- Read and validate cell data inside a type script
+- Count inputs and outputs using script groups
+
+## Prerequisites
+
+- Completion of Lessons 1-9 (Cell Model, Transactions, Scripts, Lock Scripts, Debugging)
+- Rust toolchain installed (`rustup`)
+- Node.js 18+ installed
+- Basic familiarity with Rust no_std development
+
+## Concepts
+
+### What Are Type Scripts?
+
+Every CKB cell has two script fields:
+
+- **Lock script** (required): Controls **who** can spend the cell. It answers the question "Does this person have permission to consume this cell?" Lock scripts run only when a cell is consumed as a transaction input.
+
+- **Type script** (optional): Controls **what** the cell can contain and **how** it can change. It answers the question "Is this state transition valid?" Type scripts run for **both input and output cells** — any cell that references the type script in a transaction triggers its execution.
+
+Think of it this way:
+
+- A **lock script** is like a lock on a safe. It determines who has the key to open it.
+- A **type script** is like a rulebook inside the safe. It dictates what documents can be stored there and how they can be modified.
+
+### Type Script Execution: Inputs AND Outputs
+
+This is the critical difference from lock scripts. When a transaction is processed, CKB-VM runs type scripts for **every cell that references them**, whether the cell is an input (being consumed) or an output (being created):
+
+```
+Transaction:
+  Inputs:                          Outputs:
+    Cell A (type: Counter) ---+      Cell C (type: Counter) ---+
+    Cell B (type: None)    |      Cell D (type: None)       |
+                               |                                |
+                               v                                v
+                         Type script runs              Type script runs
+                         for input cells               for output cells
+                               |                                |
+                               +--- Combined validation --------+
+```
+
+The type script sees all cells in its **script group** — all cells (inputs and outputs) that share the exact same type script (same code_hash, hash_type, and args). It must examine all of them and decide if the overall state transition is valid.
+
+### The Three Scenarios
+
+A type script must handle three scenarios based on which cells are in its group:
+
+| Scenario | GroupInputs | GroupOutputs | Meaning |
+|----------|-------------|--------------|---------|
+| **Creation** | 0 | 1+ | New cells with this type are being minted |
+| **Update** | 1+ | 1+ | Existing cells are being consumed and new ones created |
+| **Destruction** | 1+ | 0 | Cells with this type are being removed |
+
+Each scenario requires different validation logic. For our counter:
+
+- **Creation**: The counter data must be initialized to 0.
+- **Update**: The output counter must equal the input counter plus 1.
+- **Destruction**: Always allowed (the owner can reclaim their CKB).
+
+### Script Groups Explained
+
+CKB does not run a type script once per cell. Instead, it **groups** all cells by their complete script (code_hash + hash_type + args) and runs the script **once per group**.
+
+For example, if a transaction has three cells with the same counter type script, the script runs once and sees all three cells in its group. This is why we use `Source::GroupInput` and `Source::GroupOutput` — they filter to only the cells in our group.
+
+```
+Cell A: type = {codeHash: 0xabc, hashType: type, args: 0x01}  ---> Group 1
+Cell B: type = {codeHash: 0xabc, hashType: type, args: 0x01}  ---> Group 1 (same script)
+Cell C: type = {codeHash: 0xabc, hashType: type, args: 0x02}  ---> Group 2 (different args!)
+Cell D: type = None                                             ---> No type script, no group
+```
+
+Cells A and B are in the same group (validated together). Cell C is in a separate group (validated independently) because it has different args.
+
+### The Counter as a State Machine
+
+Our counter is the simplest meaningful state machine on CKB:
+
+```
+CREATE         UPDATE         UPDATE         UPDATE         DESTROY
+  |              |              |              |              |
+  v              v              v              v              v
+[0] ---------> [1] ---------> [2] ---------> [3] ---------> (gone)
+```
+
+Each transition is a separate CKB transaction. The type script validates every transition, and no invalid transitions can ever occur — this is enforced at the consensus level by every node on the network.
+
+## Step-by-Step Code Walkthrough
+
+### The On-Chain Rust Contract
+
+The counter type script is written in Rust and compiles to a RISC-V binary that runs inside CKB-VM. Let's walk through it piece by piece.
+
+#### Setting Up the Environment
+
+```rust
+#![no_std]
+#![no_main]
+```
+
+CKB scripts run in a bare-metal RISC-V environment with no operating system. `no_std` tells Rust not to link the standard library, and `no_main` tells it we provide our own entry point.
+
+#### Imports
+
+```rust
+use ckb_std::error::SysError;
+use ckb_std::high_level::load_cell_data;
+use ckb_std::ckb_constants::Source;
+
+ckb_std::entry!(main);
+```
+
+The key imports from `ckb_std`:
+
+- `SysError`: Error type for CKB syscalls. `SysError::IndexOutOfBound` signals "no more items" when iterating.
+- `load_cell_data(index, source)`: Reads the data field of a cell at the given index from the given source.
+- `Source`: Enum with variants like `GroupInput` and `GroupOutput` that filter cells to our script group.
+- `entry!`: Macro that sets up the RISC-V entry point.
+
+#### Error Codes
+
+```rust
+const ERROR_INVALID_DATA_LENGTH: i8 = 5;
+const ERROR_COUNTER_NOT_ZERO_ON_CREATION: i8 = 6;
+const ERROR_INVALID_CELL_COUNT: i8 = 7;
+const ERROR_COUNTER_NOT_INCREMENTED: i8 = 8;
+```
+
+When the type script rejects a transaction, it returns an error code. Meaningful codes help developers debug why a transaction was rejected.
+
+#### Counting Cells in a Group
+
+```rust
+fn count_cells_in_group(source: Source) -> usize {
+    let mut count = 0;
+    loop {
+        match load_cell_data(count, source) {
+            Ok(_) => count += 1,
+            Err(SysError::IndexOutOfBound) => break,
+            Err(_) => break,
+        }
+    }
+    count
+}
+```
+
+This is a standard CKB pattern: iterate through indices starting at 0 until you get `IndexOutOfBound`. There is no "get count" syscall, so this is the idiomatic way to count cells.
+
+#### Parsing the Counter Value
+
+```rust
+fn parse_counter(data: &[u8]) -> Result<u64, i8> {
+    if data.len() != 8 {
+        return Err(ERROR_INVALID_DATA_LENGTH);
+    }
+    let bytes: [u8; 8] = data.try_into().map_err(|_| ERROR_INVALID_DATA_LENGTH)?;
+    Ok(u64::from_le_bytes(bytes))
+}
+```
+
+The counter is stored as a `u64` in little-endian byte order (8 bytes). Little-endian matches RISC-V's native byte order. Strict length checking (exactly 8 bytes) prevents accidental misuse.
+
+#### The Main Validation Logic
+
+```rust
+fn main() -> Result<(), i8> {
+    let input_count = count_cells_in_group(Source::GroupInput);
+    let output_count = count_cells_in_group(Source::GroupOutput);
+
+    match (input_count, output_count) {
+        // CREATION: no inputs, outputs exist
+        (0, _) => {
+            for i in 0..output_count {
+                let data = load_cell_data(i, Source::GroupOutput)
+                    .map_err(|_| ERROR_INVALID_DATA_LENGTH)?;
+                let counter = parse_counter(&data)?;
+                if counter != 0 {
+                    return Err(ERROR_COUNTER_NOT_ZERO_ON_CREATION);
+                }
+            }
+            Ok(())
+        }
+
+        // UPDATE: both inputs and outputs exist
+        (_, _) if input_count > 0 && output_count > 0 => {
+            if input_count != 1 || output_count != 1 {
+                return Err(ERROR_INVALID_CELL_COUNT);
+            }
+            let input_data = load_cell_data(0, Source::GroupInput)
+                .map_err(|_| ERROR_INVALID_DATA_LENGTH)?;
+            let input_counter = parse_counter(&input_data)?;
+
+            let output_data = load_cell_data(0, Source::GroupOutput)
+                .map_err(|_| ERROR_INVALID_DATA_LENGTH)?;
+            let output_counter = parse_counter(&output_data)?;
+
+            if output_counter != input_counter + 1 {
+                return Err(ERROR_COUNTER_NOT_INCREMENTED);
+            }
+            Ok(())
+        }
+
+        // DESTRUCTION: inputs exist, no outputs
+        (_, 0) => Ok(()),
+
+        _ => Ok(()),
+    }
+}
+```
+
+The main function follows a clear pattern:
+
+1. Count inputs and outputs in our script group.
+2. Match on the counts to determine the scenario.
+3. Apply the appropriate validation rules.
+4. Return `Ok(())` for valid transitions or `Err(code)` for invalid ones.
+
+### Reading Cell Data with load_cell_data
+
+The `load_cell_data` function is one of the most important CKB syscalls for type scripts. It reads the raw bytes stored in a cell's data field.
+
+```rust
+// Load data from the first output in our script group
+let data: Vec<u8> = load_cell_data(0, Source::GroupOutput)?;
+
+// Load data from the second input in our script group
+let data: Vec<u8> = load_cell_data(1, Source::GroupInput)?;
+```
+
+The parameters:
+- `index`: Which cell to read (0-based within the group)
+- `source`: Which group to look in (`GroupInput`, `GroupOutput`, `Input`, `Output`)
+
+The `GroupInput`/`GroupOutput` sources are filtered to only cells with the same type script. The plain `Input`/`Output` sources include all cells in the transaction.
+
+### Off-Chain Interaction
+
+The TypeScript demo shows how to interact with counter cells from off-chain code.
+
+#### Encoding Counter Values
+
+The counter is stored as a u64 in little-endian byte order. The off-chain code must use the same encoding:
+
+```typescript
+function counterToHex(value: number): string {
+  const buffer = new ArrayBuffer(8);
+  const view = new DataView(buffer);
+  view.setBigUint64(0, BigInt(value), true); // true = little-endian
+  const bytes = new Uint8Array(buffer);
+  return "0x" + Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+```
+
+Example encodings:
+- `counterToHex(0)` returns `"0x0000000000000000"`
+- `counterToHex(1)` returns `"0x0100000000000000"`
+- `counterToHex(256)` returns `"0x0001000000000000"`
+
+#### Creating a Counter Cell
+
+To create a counter, build a transaction with an output cell that has the counter type script and data initialized to 0:
+
+```typescript
+const counterCell = ccc.Cell.from({
+  cellOutput: {
+    capacity: ccc.fixedPointFrom("69"),
+    lock: senderLockScript,
+    type: counterTypeScript,
+  },
+  outputData: counterToHex(0), // Must be 0 for creation
+});
+```
+
+#### Incrementing the Counter
+
+To increment, consume the existing counter cell and create a new one with data + 1:
+
+```typescript
+// Find the existing counter cell
+const existingCell = await client.getCellLive(counterOutPoint, true);
+const currentValue = hexToCounter(existingCell.outputData);
+
+// Build the increment transaction
+const tx = ccc.Transaction.from({
+  inputs: [{ previousOutput: counterOutPoint }],
+  outputs: [{
+    capacity: existingCell.cellOutput.capacity,
+    lock: existingCell.cellOutput.lock,
+    type: existingCell.cellOutput.type,
+  }],
+  outputsData: [counterToHex(currentValue + 1)],
+});
+```
+
+#### Invalid Updates
+
+The type script rejects any invalid state transitions:
+
+| Attempted Transition | Input Data | Output Data | Result |
+|---------------------|------------|-------------|--------|
+| Skip from 0 to 5 | 0 | 5 | REJECTED (error 8) |
+| Decrement from 3 to 2 | 3 | 2 | REJECTED (error 8) |
+| Keep same value | 3 | 3 | REJECTED (error 8) |
+| Create at 42 | (none) | 42 | REJECTED (error 6) |
+| Wrong data size | (none) | 4 bytes | REJECTED (error 5) |
+
+## Creating vs Updating vs Destroying
+
+Here is a visual comparison of the three transaction types:
+
+### Creation Transaction
+
+```
+INPUTS:                        OUTPUTS:
+  [Plain CKB cell]      --->    [Counter cell: data=0, type=counter]
+  (provides capacity)           [Change cell: leftover CKB]
+```
+
+Type script sees: 0 group inputs, 1 group output. This is creation. Verifies data == 0.
+
+### Update Transaction
+
+```
+INPUTS:                        OUTPUTS:
+  [Counter cell: data=N]  --->  [Counter cell: data=N+1, type=counter]
+```
+
+Type script sees: 1 group input, 1 group output. This is update. Verifies output == input + 1.
+
+### Destruction Transaction
+
+```
+INPUTS:                        OUTPUTS:
+  [Counter cell: data=N]  --->  [Plain CKB cell: no type script]
+```
+
+Type script sees: 1 group input, 0 group outputs. This is destruction. Allowed unconditionally.
+
+## State Transition Validation Patterns
+
+The counter demonstrates a general pattern used across CKB applications. Here are common validation strategies:
+
+### Conservation Pattern (Tokens)
+
+Used by xUDT and other token standards. The type script ensures that the total amount of tokens in inputs equals the total in outputs (no creation or destruction of tokens without authorization):
+
+```rust
+let input_total: u128 = sum of all input token amounts;
+let output_total: u128 = sum of all output token amounts;
+if output_total > input_total { return Err(ERROR_INFLATION); }
+```
+
+### Uniqueness Pattern (NFTs)
+
+Used by Spore and other NFT protocols. The type script ensures that each token ID appears at most once across all outputs:
+
+```rust
+for each output in GroupOutput {
+    let id = extract_id(output.data);
+    if seen_ids.contains(id) { return Err(ERROR_DUPLICATE); }
+    seen_ids.insert(id);
+}
+```
+
+### Monotonic Pattern (Our Counter)
+
+The simplest state machine: the value can only move in one direction. This pattern is useful for sequence numbers, nonces, and versioning:
+
+```rust
+if output_value != input_value + 1 { return Err(ERROR_NOT_INCREMENTED); }
+```
+
+## Running the Code
+
+### Build the On-Chain Contract
+
+```bash
+cd lessons/10-type-script-counter/contracts/counter
+rustup target add riscv64imac-unknown-none-elf
+cargo build --release --target riscv64imac-unknown-none-elf
+```
+
+### Run the Off-Chain Demo
+
+```bash
+cd lessons/10-type-script-counter/scripts
+npm install
+npx tsx src/index.ts
+```
+
+The demo connects to the CKB testnet and walks through every counter operation with detailed explanations.
+
+## Real-World Applications of Type Scripts
+
+Type scripts are the foundation of all smart contract logic on CKB:
+
+- **xUDT (User Defined Tokens)**: The type script enforces conservation of supply. Total tokens in must equal total tokens out (unless minting or burning is authorized).
+
+- **Spore Protocol (NFTs)**: The type script ensures each NFT has a unique ID, immutable content, and cannot be duplicated.
+
+- **Nervos DAO**: The type script enforces deposit/withdrawal rules, calculates compensation based on block headers, and manages lock periods.
+
+- **AMM DEX**: The type script enforces the constant product formula (x * y = k) so that liquidity pools cannot be drained by invalid trades.
+
+- **State Channels**: The type script validates off-chain state transitions when settling on-chain, ensuring only valid final states are accepted.
+
+## Summary
+
+In this lesson, you learned:
+
+- **Type scripts** validate what a cell can contain and how it can change. They run for both inputs and outputs.
+- **Lock scripts vs type scripts**: Lock = who can modify (authorization). Type = what modifications are valid (data integrity).
+- **The counter pattern** is a state machine: create at 0, increment by 1, destroy freely.
+- **Script groups**: CKB groups cells by their complete script and runs validation once per group.
+- **load_cell_data**: The primary syscall for reading cell data in type scripts.
+- **Counting cells**: Iterate with indices until `IndexOutOfBound` — the standard CKB pattern.
+- **State transitions**: CKB cells are immutable. "Updating" means consuming the old cell and creating a new one with updated data. The type script validates the transition.
+- **Consensus enforcement**: Type script rules are checked by every node. Invalid state transitions are impossible, regardless of who submits the transaction.
+
+## What's Next
+
+In the next lesson, you will learn about **Molecule Serialization** — the binary encoding format used for structured data in CKB scripts. While our counter uses a simple 8-byte u64, real applications need to encode complex data structures. Molecule provides a compact, schema-driven format that is efficient to parse inside CKB-VM.

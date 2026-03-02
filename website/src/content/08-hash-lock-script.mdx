@@ -1,0 +1,544 @@
+# Your First Lock Script (Rust)
+
+## Overview
+
+In this lesson, you will write your first on-chain CKB script in Rust. You will implement a **hash lock** — a lock script that allows a cell to be consumed only when the spender provides a secret preimage whose blake2b hash matches a hash stored in the script args.
+
+This is a watershed moment in your CKB learning journey. Up until now, you have been using the default lock scripts that ship with CKB (such as the secp256k1-blake160 lock used for standard addresses). Now you will create your own lock script from scratch, gaining a deep understanding of how CKB's programmability works at the lowest level.
+
+By the end of this lesson, you will be able to:
+
+- Write a CKB lock script in Rust using the `ckb-std` library
+- Understand how Rust code is compiled to RISC-V and executed inside CKB-VM
+- Use CKB syscalls to load script args and witness data
+- Implement blake2b hashing on-chain to verify preimages
+- Deploy custom script binaries to the CKB network
+- Create cells locked with custom lock scripts
+- Unlock cells by providing the correct preimage in a transaction witness
+
+## Prerequisites
+
+- Lessons 1-7 completed (especially Lesson 7: Script Basics)
+- Node.js 18+ installed
+- Basic familiarity with Rust syntax (variables, functions, match expressions, error handling)
+- Understanding of lock scripts and how they control cell spending
+- Rust toolchain installed (optional, for compiling the on-chain contract)
+
+## Concepts
+
+### Why Rust for CKB Scripts?
+
+CKB scripts run inside **CKB-VM**, a virtual machine that executes the RISC-V instruction set. RISC-V is a real, open hardware architecture used in CPUs — CKB chose it because it is simple, well-specified, and has excellent toolchain support.
+
+Any language that can compile to RISC-V can be used for CKB scripts. In practice, Rust and C are the two primary choices:
+
+| Language | Pros | Cons |
+|----------|------|------|
+| **Rust** | Memory safety, rich type system, excellent tooling, no undefined behavior | Steeper learning curve, larger binaries |
+| **C** | Minimal binary size, direct hardware control, widely known | Manual memory management, prone to security bugs |
+
+Rust is the recommended choice for new CKB scripts because its compile-time safety guarantees prevent entire categories of bugs (buffer overflows, use-after-free, null pointer dereferences) that are common in C and critical in a financial context.
+
+### The `ckb-std` Library
+
+Since CKB scripts run in a bare-metal RISC-V environment (no operating system), you cannot use Rust's standard library (`std`). The `ckb-std` crate fills this gap by providing:
+
+**Memory Allocation**: The `default_alloc!()` macro sets up a simple memory allocator for the no_std environment, enabling heap allocations (Vec, Box, etc.).
+
+**CKB Syscalls**: Functions that let your script interact with the CKB-VM to read transaction data:
+
+```rust
+// Load the currently executing script (to read code_hash, hash_type, args)
+let script = load_script()?;
+
+// Load a witness from the transaction (by index and source)
+let witness = load_witness(0, Source::GroupInput)?;
+
+// Load cell data from an input or output
+let data = load_cell_data(0, Source::Input)?;
+
+// Load a cell's lock script
+let lock = load_cell_lock(0, Source::Input)?;
+```
+
+**Hashing**: Blake2b implementation with CKB's standard personalization:
+
+```rust
+let mut hasher = new_blake2b();
+hasher.update(data);
+let mut hash = [0u8; 32];
+hasher.finalize(&mut hash);
+```
+
+**Entry Point**: The `entry!()` macro defines the program entry point that CKB-VM calls.
+
+**Type Definitions**: Molecule-serialized CKB types (Script, CellOutput, WitnessArgs, etc.) with `Unpack` trait for converting to usable Rust types.
+
+### The Hash Lock Pattern
+
+A hash lock is one of the simplest meaningful lock scripts you can write. Here is the pattern:
+
+```
+LOCK (creating the cell):
+  1. Choose a secret string (the "preimage")
+  2. Compute: hash = blake2b_256(preimage)
+  3. Create a cell with lock script args = hash
+  4. The cell is now locked — only someone with the preimage can spend it
+
+UNLOCK (spending the cell):
+  1. Create a transaction with the locked cell as input
+  2. Put the preimage in the transaction's witness data
+  3. The on-chain script verifies: blake2b_256(witness) == args
+  4. If match → cell is consumed. If mismatch → transaction rejected.
+```
+
+This pattern appears throughout blockchain systems:
+
+- **HTLCs** (Hash Time-Locked Contracts): Used in Lightning Network and atomic swaps
+- **Commit-reveal schemes**: First commit a hash, then reveal the preimage
+- **Simple secret sharing**: Anyone with the secret can claim the cell
+
+### CKB-VM Execution Model
+
+Understanding how CKB-VM executes scripts is essential for writing correct ones.
+
+**When does a script run?**
+
+Every time a transaction is submitted, CKB validates it by executing scripts:
+1. **Lock scripts**: For each input cell, CKB runs the cell's lock script. The lock script must return `0` to authorize spending.
+2. **Type scripts**: For each input and output cell that has a type script, CKB runs that type script. Type scripts validate state transitions.
+
+**What can a script access?**
+
+Scripts run in a sandboxed environment. They cannot:
+- Access the network
+- Read or write files
+- Access other transactions
+- Modify any data
+
+They CAN:
+- Read the current transaction's structure (inputs, outputs, witnesses, cell deps)
+- Read the data and scripts of referenced cells
+- Perform computation (hashing, signature verification, custom logic)
+- Return an exit code (0 = success, non-zero = failure)
+
+**Cycle counting**
+
+CKB-VM meters every instruction. Each RISC-V instruction costs a certain number of cycles. The total cycles consumed by all scripts in a transaction must not exceed the block's maximum cycle limit. This prevents infinite loops and denial-of-service attacks.
+
+### Understanding Sources and Groups
+
+When loading data with syscalls, you specify a **Source** that tells CKB-VM where to look:
+
+```rust
+// Source::Input — Load from all transaction inputs
+let witness = load_witness(0, Source::Input)?; // First witness
+
+// Source::GroupInput — Load from inputs sharing THIS lock/type script
+let witness = load_witness(0, Source::GroupInput)?; // First witness in the group
+```
+
+**Why does GroupInput matter?**
+
+Suppose a transaction has 5 inputs, and inputs #1, #3, and #4 all use the hash-lock script. CKB groups these together and runs the hash-lock script ONCE for the entire group (not 3 times). When the script uses `Source::GroupInput`:
+- Index 0 refers to input #1 (the first in the group)
+- Index 1 refers to input #3 (the second in the group)
+- Index 2 refers to input #4 (the third in the group)
+
+This is more efficient and lets the script handle all its inputs in a single execution.
+
+## Step-by-Step Tutorial
+
+### Step 1: Understand the Project Structure
+
+The lesson project has two parts:
+
+```
+08-hash-lock-script/
+├── contracts/hash-lock/       # On-chain Rust script
+│   ├── Cargo.toml             # RISC-V target, ckb-std dependency
+│   └── src/main.rs            # The lock script implementation
+└── scripts/                   # Off-chain TypeScript interaction
+    ├── package.json
+    └── src/index.ts           # Hash computation and tx construction demo
+```
+
+The Rust code is what runs on-chain inside CKB-VM. The TypeScript code is what runs off-chain to interact with the script (deploy it, create locked cells, unlock them).
+
+### Step 2: The Cargo.toml Configuration
+
+Open `contracts/hash-lock/Cargo.toml`:
+
+```toml
+[package]
+name = "hash-lock"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ckb-std = "0.16"
+
+[profile.release]
+opt-level = "s"    # Optimize for size (scripts should be small)
+lto = true         # Link-Time Optimization (dead code elimination)
+codegen-units = 1  # Better optimization at cost of compile time
+panic = "abort"    # No unwinding (saves binary size)
+strip = true       # Remove debug symbols
+```
+
+Key points:
+- The only dependency is `ckb-std`, which provides everything needed for CKB script development.
+- The release profile aggressively optimizes for binary size. Smaller binaries cost less CKB to store on-chain and consume fewer CKB-VM cycles to load.
+
+### Step 3: The Rust Lock Script — Preamble
+
+The beginning of `contracts/hash-lock/src/main.rs` sets up the bare-metal environment:
+
+```rust
+#![no_std]   // No standard library (bare-metal RISC-V)
+#![no_main]  // No normal main() entry point
+
+use ckb_std::ckb_types::prelude::*;  // Unpack trait for Molecule types
+use ckb_std::default_alloc;          // Memory allocator
+use ckb_std::entry;                  // Entry point macro
+use ckb_std::high_level::{load_script, load_witness};  // CKB syscalls
+
+default_alloc!();  // Set up the memory allocator
+entry!(main);      // Define main() as the entry point
+```
+
+`#![no_std]` is mandatory because there is no operating system in CKB-VM. `#![no_main]` is needed because CKB-VM does not use the standard Rust entry point — instead, the `entry!()` macro generates the correct `_start` symbol.
+
+### Step 4: Define Error Codes
+
+CKB scripts communicate through exit codes. Define meaningful error codes:
+
+```rust
+const ERROR_INVALID_ARGS_LENGTH: i8 = 5;  // Args not 32 bytes
+const ERROR_NO_WITNESS: i8 = 6;           // No witness provided
+const ERROR_EMPTY_PREIMAGE: i8 = 7;       // Witness is empty
+const ERROR_HASH_MISMATCH: i8 = 8;        // Hash verification failed
+```
+
+When a transaction fails, the CKB node reports the exit code. Having distinct codes for each failure mode makes debugging much easier. By convention, codes 1-4 are reserved for internal CKB errors, so user scripts start at 5 or higher.
+
+### Step 5: Implement blake2b Hashing
+
+The hash function is the heart of our lock script. CKB uses blake2b-256 with the personalization string `"ckb-default-hash"`:
+
+```rust
+const BLAKE2B_256_HASH_LEN: usize = 32;
+
+fn blake2b_256(data: &[u8]) -> [u8; BLAKE2B_256_HASH_LEN] {
+    // new_blake2b() creates a hasher with CKB's personalization
+    let mut hasher = ckb_std::blake2b::new_blake2b();
+
+    // Feed the input data
+    hasher.update(data);
+
+    // Finalize and get the 32-byte hash
+    let mut hash = [0u8; BLAKE2B_256_HASH_LEN];
+    hasher.finalize(&mut hash);
+    hash
+}
+```
+
+The **personalization** string is crucial. It is a domain separator that ensures CKB blake2b hashes are distinct from blake2b hashes used in other contexts. If you use the wrong personalization off-chain, the hashes will not match the on-chain computation, and your lock will never unlock.
+
+### Step 6: The Main Verification Logic
+
+The `main()` function is where the actual verification happens:
+
+```rust
+fn main() -> i8 {
+    // STEP 1: Load the currently executing script
+    let script = match load_script() {
+        Ok(script) => script,
+        Err(_) => return 1,
+    };
+
+    // STEP 2: Extract the expected hash from script args
+    let args = script.args().unpack();
+    let expected_hash: Vec<u8> = args.to_vec();
+
+    // Validate: args must be exactly 32 bytes (a blake2b-256 hash)
+    if expected_hash.len() != BLAKE2B_256_HASH_LEN {
+        return ERROR_INVALID_ARGS_LENGTH;
+    }
+
+    // STEP 3: Load the preimage from the witness
+    let witness = match load_witness(0, Source::GroupInput) {
+        Ok(witness) => witness,
+        Err(_) => return ERROR_NO_WITNESS,
+    };
+
+    let preimage: &[u8] = &witness;
+
+    if preimage.is_empty() {
+        return ERROR_EMPTY_PREIMAGE;
+    }
+
+    // STEP 4: Compute blake2b_256(preimage)
+    let computed_hash = blake2b_256(preimage);
+
+    // STEP 5: Compare hashes
+    if computed_hash[..] != expected_hash[..] {
+        return ERROR_HASH_MISMATCH;
+    }
+
+    // STEP 6: Success! Approve the transaction.
+    0
+}
+```
+
+Let us walk through each step:
+
+**Step 1 — load_script()**: This syscall returns the Script struct for the currently executing script. Every running script can load itself — this is how the script accesses its own `args` field.
+
+**Step 2 — Extract args**: The `args()` method returns the script's args in Molecule-packed format. `.unpack()` converts it to a standard Rust `Bytes` type, and `.to_vec()` gives us a `Vec<u8>`. We validate that the args are exactly 32 bytes (the size of a blake2b-256 hash).
+
+**Step 3 — load_witness()**: This syscall loads the witness at index 0 from `Source::GroupInput`. `GroupInput` means "the witnesses corresponding to inputs that share this same lock script." The witness contains the preimage that the spender claims is the secret.
+
+**Step 4 — Hash the preimage**: We compute the blake2b-256 hash of the provided preimage using the same algorithm and personalization that was used when the cell was created.
+
+**Step 5 — Compare**: If the computed hash matches the expected hash from args, the spender has proven knowledge of the secret. We return 0 (success).
+
+### Step 7: Deploying the Script to CKB
+
+After compiling the Rust code to a RISC-V binary, you deploy it by creating a cell whose data contains the binary:
+
+```typescript
+import { ccc } from "@ckb-ccc/core";
+import { readFileSync } from "fs";
+
+// Read the compiled binary
+const binary = readFileSync("contracts/hash-lock/target/riscv64imac-unknown-none-elf/release/hash-lock");
+const binaryHex = "0x" + binary.toString("hex");
+
+// Create a deployment transaction
+const deployTx = ccc.Transaction.from({
+  outputs: [{
+    lock: deployerLockScript,  // The deployer owns the code cell
+  }],
+  outputsData: [binaryHex],   // The binary goes in the cell's data
+});
+
+// The cell needs enough capacity to store the binary
+// Capacity >= 8 (capacity) + lock_script_size + data_size bytes
+await deployTx.completeFeeBy(signer);
+await signer.signTransaction(deployTx);
+const deployTxHash = await client.sendTransaction(deployTx);
+```
+
+After deployment, compute the `code_hash`:
+
+```typescript
+// code_hash = blake2b_256(binary_data)
+const codeHash = ckbBlake2b256(binary);
+// This code_hash is used by other cells to reference our script
+```
+
+### Step 8: Creating a Hash-Locked Cell
+
+Now create a cell that uses the hash-lock script:
+
+```typescript
+// Choose a secret and compute its hash
+const preimage = "my-secret-value";
+const preimageBytes = new TextEncoder().encode(preimage);
+const preimageHash = ckbBlake2b256(preimageBytes);
+
+// Construct the hash-lock script
+const hashLockScript = ccc.Script.from({
+  codeHash: codeHash,       // Points to our deployed binary
+  hashType: "data1",        // code_hash = hash of binary data
+  args: preimageHash,       // The expected hash (32 bytes)
+});
+
+// Create a cell locked with the hash-lock
+const lockTx = ccc.Transaction.from({
+  outputs: [{
+    lock: hashLockScript,   // Our custom lock!
+  }],
+  outputsData: ["0x"],
+});
+
+lockTx.outputs[0].capacity = 200n * 100_000_000n; // Lock 200 CKB
+await lockTx.completeFeeBy(signer);
+await signer.signTransaction(lockTx);
+const lockTxHash = await client.sendTransaction(lockTx);
+```
+
+The cell is now on-chain, locked by our hash-lock script. No one can spend it without the preimage.
+
+### Step 9: Unlocking the Cell
+
+To spend the hash-locked cell, provide the preimage as a witness:
+
+```typescript
+// Build the unlock transaction
+const unlockTx = ccc.Transaction.from({
+  inputs: [{
+    previousOutput: {
+      txHash: lockTxHash,
+      index: 0,
+    },
+  }],
+  outputs: [{
+    lock: recipientLockScript,
+  }],
+  outputsData: ["0x"],
+  cellDeps: [{
+    outPoint: {
+      txHash: deployTxHash,   // Where the script binary is deployed
+      index: 0,
+    },
+    depType: "code",
+  }],
+});
+
+// Set the witness to the preimage
+const preimageHex = "0x" + Buffer.from(preimage).toString("hex");
+unlockTx.witnesses[0] = preimageHex;
+
+// Set output capacity (locked amount minus fee)
+unlockTx.outputs[0].capacity = 199_99_000_000n; // ~200 CKB minus fee
+
+// Send — no private key signature needed! The hash-lock only checks the preimage.
+const unlockTxHash = await client.sendTransaction(unlockTx);
+```
+
+Notice that we do **not** need to sign with a private key. The hash-lock script only verifies the preimage — it does not check any signature. This is fundamentally different from the default secp256k1-blake160 lock, which requires a valid signature.
+
+### Step 10: Run the Off-Chain Demonstration
+
+The lesson includes a TypeScript script that demonstrates the complete hash-lock lifecycle:
+
+```bash
+cd lessons/08-hash-lock-script/scripts
+npm install
+npm start
+```
+
+The script shows:
+1. Off-chain blake2b hash computation
+2. Hash verification (correct preimage produces matching hash)
+3. Failed verification (wrong preimage produces different hash)
+4. Conceptual deployment, locking, and unlocking transaction construction
+5. Cell dependency explanation
+
+### Step 11: Understanding Cell Dependencies
+
+When a transaction uses a custom script, it must tell CKB where to find the script code. This is done through `cell_deps`:
+
+```typescript
+cellDeps: [{
+  outPoint: {
+    txHash: deployTxHash,  // The transaction that deployed the binary
+    index: 0,              // The output index of the code cell
+  },
+  depType: "code",         // The cell data IS the script binary
+}]
+```
+
+`depType` has two values:
+- `"code"`: The cell's data field contains the script binary directly.
+- `"dep_group"`: The cell's data field contains a list of OutPoints referencing other cells. This is used to bundle multiple dependencies together (for example, the default secp256k1 lock uses a dep_group that includes both the lock script binary and the secp256k1 library).
+
+Cell deps are NOT consumed by the transaction — they are read-only references. The code cell remains live after being used as a dependency.
+
+## Testing Patterns
+
+### Unit Testing with ckb-testtool
+
+The CKB ecosystem provides `ckb-testtool` for testing scripts in a simulated environment:
+
+```rust
+// In a test file (requires ckb-testtool crate)
+#[test]
+fn test_hash_lock_success() {
+    // 1. Set up a simulated chain environment
+    // 2. Deploy the hash-lock script
+    // 3. Create a hash-locked cell
+    // 4. Build an unlock transaction with the correct preimage
+    // 5. Verify the transaction succeeds (exit code 0)
+}
+
+#[test]
+fn test_hash_lock_wrong_preimage() {
+    // 1. Set up environment and deploy
+    // 2. Create a hash-locked cell
+    // 3. Build an unlock transaction with the WRONG preimage
+    // 4. Verify the transaction fails with ERROR_HASH_MISMATCH (code 8)
+}
+```
+
+### Integration Testing with Devnet
+
+For end-to-end testing, run a local CKB devnet:
+
+```bash
+# Initialize and start a devnet
+ckb init --chain dev -C /tmp/ckb-devnet
+ckb run -C /tmp/ckb-devnet
+
+# In another terminal, start the miner
+ckb miner -C /tmp/ckb-devnet
+```
+
+Then deploy your script and run actual transactions against the devnet.
+
+### Testing Checklist
+
+When testing a lock script, verify these scenarios:
+
+1. **Happy path**: Correct preimage unlocks the cell (exit code 0)
+2. **Wrong preimage**: Incorrect preimage is rejected (exit code 8)
+3. **No witness**: Missing witness is rejected (exit code 6)
+4. **Empty witness**: Empty preimage is rejected (exit code 7)
+5. **Invalid args**: Wrong args length is rejected (exit code 5)
+6. **Multiple inputs**: Multiple hash-locked inputs in the same group work correctly
+
+## Common Pitfalls
+
+### Personalization Mismatch
+
+The most common bug is using different blake2b personalizations on-chain and off-chain. CKB uses `"ckb-default-hash"` as the personalization for standard hashing. If your off-chain code uses a generic blake2b without this personalization, the hashes will differ and unlock will always fail.
+
+### Witness Format
+
+In this educational example, we treat the entire witness as the raw preimage. In production scripts, witnesses typically use the `WitnessArgs` Molecule structure, which has separate fields for `lock`, `input_type`, and `output_type`. The preimage would go in the `lock` field. Using WitnessArgs is recommended because:
+- Multiple scripts can coexist in the same transaction, each reading its own field
+- It follows CKB conventions that wallets and tools expect
+
+### Binary Size
+
+CKB cells require capacity proportional to their data size. A 100 KB script binary requires approximately 100 CKB just to store it. Optimize your binary size with the release profile settings shown in the Cargo.toml.
+
+### Cycle Limits
+
+CKB-VM has a maximum cycle limit per transaction. Complex scripts that perform heavy computation may exceed this limit. Blake2b hashing is efficient, but scripts that hash very large inputs or perform many iterations should be tested for cycle consumption.
+
+## Summary
+
+In this lesson, you wrote your first CKB lock script in Rust — a hash lock that verifies a preimage against a stored hash. You learned:
+
+1. **CKB scripts are Rust programs** compiled to RISC-V and executed in CKB-VM, a sandboxed virtual machine.
+
+2. **The `ckb-std` library** provides memory allocation, CKB syscalls, and hashing for the no_std environment.
+
+3. **Lock scripts control spending**: They return 0 to approve a transaction or non-zero to reject it.
+
+4. **Syscalls read transaction data**: `load_script()` reads the script's own args, `load_witness()` reads witness data provided by the spender.
+
+5. **Blake2b-256 with CKB personalization** (`"ckb-default-hash"`) is the standard hash function. The same personalization must be used on-chain and off-chain.
+
+6. **Scripts are deployed as cell data**: The compiled binary is stored in a cell, and other cells reference it through `code_hash` and `hash_type`.
+
+7. **Cell deps tell CKB where to find code**: Transactions include `cell_deps` pointing to the code cell so CKB-VM knows where to load the script binary.
+
+8. **Hash locks are identity-free**: Unlike signature-based locks, anyone with the preimage can spend the cell regardless of their identity.
+
+The hash lock is simple but powerful. It demonstrates every fundamental concept of CKB on-chain script development: loading script data, reading witnesses, performing verification, and returning success or failure. These same patterns apply to every CKB script you will ever write, from simple locks to complex DeFi protocols.
+
+In the next lesson, you will learn how to debug CKB scripts using the CKB debugger when things go wrong.

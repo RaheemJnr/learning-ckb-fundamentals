@@ -1,0 +1,101 @@
+{
+  "lessonId": 8,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What is the hash-lock pattern in CKB and when would you use it?",
+      "options": [
+        "A lock script that requires a secp256k1 signature; used for all standard CKB addresses",
+        "A lock script that stores a hash in args and grants spending rights to whoever provides the matching preimage; used for secret-sharing, HTLCs, and commit-reveal schemes",
+        "A type script that hashes cell data to prevent tampering; used for immutable data storage",
+        "A hash map stored in cell data that maps public keys to permissions; used for multi-party access control"
+      ],
+      "correctAnswer": 1,
+      "explanation": "A hash lock stores a blake2b hash in the script args and allows spending when the witness contains a value (the preimage) that hashes to match. It requires no private key — anyone with the secret can spend. This makes it ideal for Hash Time-Locked Contracts (HTLCs) used in payment channels and atomic swaps, commit-reveal schemes where you first commit a hash then later reveal the preimage, and simple secret-sharing where the secret itself is the credential."
+    },
+    {
+      "id": 2,
+      "question": "What does the `ckb-std` crate provide that makes Rust CKB script development possible?",
+      "options": [
+        "A WebAssembly runtime and JavaScript interop layer for running scripts in browsers",
+        "Memory allocation (default_alloc!), CKB syscalls (load_script, load_witness, etc.), blake2b hashing, the entry point macro, and Molecule type definitions — everything needed for a no_std RISC-V environment",
+        "A Solidity compiler backend that transpiles Ethereum contracts to RISC-V bytecode",
+        "A networking library for scripts to make HTTP requests to external oracles during verification"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB scripts run in a bare-metal RISC-V environment with no operating system, so Rust's standard library is unavailable. The `ckb-std` crate provides all the pieces needed: the `default_alloc!()` macro to set up heap allocation, CKB syscalls like `load_script()` and `load_witness()` to read transaction data, a blake2b implementation with CKB's personalization, the `entry!()` macro to define the correct entry point, and Molecule-serialized CKB type definitions for parsing scripts, cells, and witnesses."
+    },
+    {
+      "id": 3,
+      "question": "Which two syscalls are primarily used to load script args and witness data in a lock script?",
+      "options": [
+        "load_cell_data() and load_cell_lock()",
+        "load_script() to get the script struct (which contains args), and load_witness() to read witness data provided by the spender",
+        "read_args() and read_witness() from the ckb_syscalls module",
+        "load_input() and load_output()"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The two key syscalls for a lock script are: (1) `load_script()` which returns the Script struct for the currently executing script — you call `.args().unpack()` on the result to get the args bytes stored in the script; and (2) `load_witness(index, source)` which loads the raw bytes from the transaction's witness array at the given index. The witness is where the spender places their authentication data — in a hash lock, this is the preimage."
+    },
+    {
+      "id": 4,
+      "question": "What is blake2b used for in CKB scripts, and what is the significance of the personalization string `\"ckb-default-hash\"`?",
+      "options": [
+        "Blake2b is used only for address generation off-chain; on-chain scripts use SHA-256 instead",
+        "Blake2b-256 is CKB's standard hash function used for script code hashing, transaction IDs, and within scripts like the hash lock. The personalization string `\"ckb-default-hash\"` is a domain separator ensuring CKB hashes are distinct from blake2b used in other contexts",
+        "Blake2b is used exclusively for compressing molecule-encoded data structures, and the personalization string is irrelevant for script development",
+        "Blake2b is the encryption algorithm used to protect private keys stored in script args"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Blake2b-256 is CKB's primary hash function, used throughout the system: code_hash (hash of script binary), transaction IDs, block hashes, and inside custom scripts. The personalization string `\"ckb-default-hash\"` is a 16-byte domain separator that makes CKB's blake2b output distinct from generic blake2b. If you compute blake2b off-chain without this personalization, the result will differ from what the on-chain script computes, causing hash mismatches that prevent unlocking. Always use CKB's personalized blake2b on both sides of the lock."
+    },
+    {
+      "id": 5,
+      "question": "How does a hash-lock script verify the preimage provided in the witness?",
+      "options": [
+        "It sends the preimage to an external oracle service and waits for a confirmation response",
+        "It reads the witness bytes, computes blake2b-256(witness) using CKB's personalization, and compares all 32 bytes of the result against the 32-byte hash stored in the script args — returning 0 on match or a non-zero error code on mismatch",
+        "It decodes the witness as a secp256k1 signature and checks it against the public key in args",
+        "It hashes the args and compares to the witness directly, without ever hashing the witness itself"
+      ],
+      "correctAnswer": 1,
+      "explanation": "A hash lock performs these steps: (1) load the expected hash from script args — the 32-byte blake2b-256 hash of the secret that was set when the cell was created; (2) load the witness at the corresponding input index — this is the raw preimage provided by the spender; (3) compute blake2b-256(preimage) using CKB's `\"ckb-default-hash\"` personalization; (4) compare all 32 bytes of the computed hash against the expected hash from args; (5) return 0 if they match (success) or a specific error code if they do not. It is critical to compare all 32 bytes — comparing fewer bytes reduces security."
+    },
+    {
+      "id": 6,
+      "question": "What RISC-V instruction set does CKB-VM implement, and why was RISC-V chosen?",
+      "options": [
+        "CKB-VM implements x86-64 because it matches the hardware that most server nodes run on",
+        "CKB-VM implements the RISC-V instruction set (specifically riscv64imac) because RISC-V is open, well-specified, simple enough to audit formally, has deterministic behavior, and has excellent compiler toolchain support including Rust and C",
+        "CKB-VM implements the EVM (Ethereum Virtual Machine) instruction set for compatibility with Solidity contracts",
+        "CKB-VM implements WebAssembly (WASM) because it is the standard for sandboxed execution in web environments"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB-VM executes the RISC-V instruction set, specifically targeting `riscv64imac-unknown-none-elf` when compiling Rust scripts. RISC-V was chosen for several key reasons: it is an open standard with no licensing constraints, its simplicity makes it easier to formally verify and audit (important for a financial system), its behavior is deterministic and fully specified (critical for consensus), and it has mature compiler support meaning Rust, C, and other languages compile to RISC-V efficiently. Compiled scripts run unchanged on any CKB node worldwide because RISC-V semantics are fixed."
+    },
+    {
+      "id": 7,
+      "question": "When deploying a custom script to CKB, where is the compiled binary stored?",
+      "options": [
+        "Scripts are uploaded to the CKB node's filesystem and referenced by filename in the transaction",
+        "The compiled RISC-V binary is stored as the data field of a regular CKB cell. Other cells reference it using a cell_dep pointing to that cell's OutPoint, and the script field uses the code_hash (blake2b hash of the binary) to identify it",
+        "Scripts are stored in a special smart contract registry maintained by the Nervos Foundation",
+        "The binary is embedded directly inside each transaction input that uses the script, making transactions self-contained"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB script deployment works entirely through the cell model: you create a transaction with one output cell whose data field contains the compiled RISC-V binary. This is called the code cell. After deployment, any transaction that wants to use this script includes a cell_dep referencing the code cell's OutPoint. The script is identified by its code_hash, which equals blake2b-256(binary_data) when hash_type is `data1` or `data2`. The code cell remains live and readable, but its CKB capacity is locked as long as the script is in use. Updating a script requires deploying a new code cell."
+    },
+    {
+      "id": 8,
+      "question": "What exit code should a successful CKB script return, and what type is the return value?",
+      "options": [
+        "Scripts return a boolean true for success and false for failure, with no numeric exit codes",
+        "A successful CKB script must return the integer 0 as an i8 (signed 8-bit integer). Any non-zero value is treated as failure. The exact non-zero value acts as an error code that indicates the reason for rejection",
+        "Scripts return HTTP status codes — 200 for success, 400 for client errors, 500 for server errors",
+        "A successful script returns a 32-byte hash confirming the state transition, and an empty byte array for failure"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB script entry functions return `i8` — a signed 8-bit integer. The contract is simple: return `0` for success (the transaction is approved), or any non-zero value for failure (the transaction is rejected). Non-zero values are treated as error codes — you define what each code means in your script. Best practice is to define named constants like `const ERROR_ARGS_TOO_SHORT: i8 = 1` so the error is human-readable in code. The valid range for user-defined error codes is 1 to 127, since negative values are typically returned by the CKB-VM itself for infrastructure-level errors."
+    }
+  ]
+}

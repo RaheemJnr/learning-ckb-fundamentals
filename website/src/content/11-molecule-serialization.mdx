@@ -1,0 +1,699 @@
+# Molecule Serialization
+
+## Overview
+
+Every piece of data stored on CKB — cells, scripts, transactions, block headers — is encoded using a binary format called **Molecule**. Understanding Molecule is essential for CKB developers because you will encounter it whenever you read cell data in an on-chain script, build transactions off-chain, or define custom data schemas.
+
+In this lesson you will build a demo project that encodes and decodes every Molecule type by hand, then attaches a type script that validates Molecule-encoded cell data on-chain.
+
+By the end of this lesson you will be able to:
+
+- Explain why blockchain systems need deterministic binary serialization formats
+- Describe the seven Molecule types and their encoding rules
+- Read and write Molecule data in Rust using `ckb-std` and `ckb-types`
+- Encode and decode Molecule data in TypeScript
+- Define custom schemas in `.mol` files
+- Walk through CKB's built-in `Script`, `CellOutput`, and `Transaction` types
+
+## Prerequisites
+
+- Completion of Lessons 1-10 (Cell Model, Transactions, Scripts, Lock Scripts, Type Scripts)
+- Basic Rust and TypeScript familiarity
+- Node.js 18+ and Rust toolchain installed
+
+## Concepts
+
+### What Is Serialization and Why Does It Matter?
+
+Serialization is the process of converting structured data (objects, structs, records) into a flat sequence of bytes that can be stored, transmitted, or hashed. Deserialization is the reverse: turning bytes back into structured data.
+
+On a blockchain, serialization has an additional requirement that most other systems do not need: **determinism**. Every node on the network must produce the exact same bytes from the same data. If two nodes serialize the same transaction differently, they will compute different hashes, and the blockchain's consensus mechanism breaks down.
+
+Consider what goes wrong with common formats:
+
+- **JSON**: The object `{"a":1,"b":2}` and `{"b":2,"a":1}` represent the same data but produce different byte sequences. JSON allows optional whitespace, different numeric representations (`1` vs `1.0` vs `1e0`), and unordered keys. These properties make JSON fundamentally incompatible with content-addressing.
+
+- **Protocol Buffers**: Protobuf encodes field tags (numbers) alongside values. It allows fields to be omitted, repeated in any order, or encoded in multiple valid ways (varint encoding of the same integer can vary). This means two Protobuf encoders can produce different bytes for the same message.
+
+- **MessagePack / CBOR**: These are compact binary formats, but they still allow multiple valid encodings of the same value and do not specify a canonical form.
+
+CKB needed a format that is:
+
+1. **Binary** — compact, no wasted bytes on field names or whitespace
+2. **Canonical** — one and only one valid byte sequence for any given value
+3. **Zero-copy** — fields can be read directly from the byte buffer without deserializing the entire structure
+4. **Schema-driven** — types are defined in schema files and validated at compile time
+
+Molecule was designed specifically to satisfy all four properties.
+
+### Why CKB Chose Molecule
+
+The Nervos team evaluated existing serialization formats and found none that met all requirements for a blockchain environment. They created Molecule with three core design goals:
+
+**Canonicalization**: Molecule has exactly one valid encoding for every value. There are no alternative representations, no optional padding, and no field reordering. This means `blake2b(molecule_encode(data))` always produces the same hash for the same data — which is fundamental to how CKB computes script hashes, transaction IDs, and cell output hashes.
+
+**Partial reading (zero-copy)**: For fixed-size types (arrays, structs), any field can be read by jumping to a known byte offset — no parsing required. For variable-size types (tables), a compact header contains the offsets of each field, so you can read any single field in O(1) time without deserializing the rest. In CKB's constrained on-chain environment, this matters greatly: a type script that only needs one field of a large structure should not pay to deserialize the whole thing.
+
+**Composability**: Molecule types can nest arbitrarily. A table can contain vectors of structs containing arrays of bytes. The encoding rules are consistent at every level.
+
+### The Molecule Type System
+
+Molecule has exactly seven types. They are divided into fixed-size types (whose byte length is known at compile time) and dynamic-size types (whose byte length varies).
+
+#### Primitive Type: byte
+
+`byte` is the atom of Molecule. It represents a single unsigned 8-bit integer. Everything in Molecule is built from bytes.
+
+```
+byte value 0x42:   [42]   (1 byte, no header)
+```
+
+#### Fixed-Size Type: array
+
+An array is a fixed-length sequence of items of the same type. The size is known at compile time: `N * sizeof(item_type)`. There is no length header because the size never changes.
+
+```mol
+array Byte32 [byte; 32];   // exactly 32 bytes, always
+array Uint64 [byte; 8];    // exactly 8 bytes, always
+array Uint128 [byte; 16];  // exactly 16 bytes, always
+```
+
+The encoding is simply the concatenation of the items:
+
+```
+Byte32: [b0][b1][b2]...[b31]   (32 bytes, no header)
+```
+
+#### Fixed-Size Type: struct
+
+A struct is a composite of fixed-size fields laid out sequentially in memory. All fields must themselves be fixed-size (bytes, arrays, or other structs). Structs have no header — they are exactly `sum(sizeof(each_field))` bytes.
+
+```mol
+struct TokenInfo {
+    name:         Byte32,   // 32 bytes at offset 0
+    symbol:       Byte32,   // 32 bytes at offset 32
+    decimals:     byte,     //  1 byte  at offset 64
+    total_supply: Uint128,  // 16 bytes at offset 65
+}
+// Total: 81 bytes. Always. No exceptions.
+```
+
+Accessing any field is a single pointer arithmetic operation:
+```
+decimals = data[64]                    // one byte read
+total_supply = data[65..81] as u128    // direct slice
+```
+
+This is true zero-copy access. No parsing, no allocation, just arithmetic.
+
+#### Dynamic-Size Type: vector
+
+Vectors are variable-length lists of a single type. Molecule has two variants depending on whether the item type is fixed-size:
+
+**FixVec** (fixed-size items): The header is a 4-byte little-endian item count. Items are concatenated after the header.
+
+```
+FixVec<byte> of [0x01, 0x02, 0x03]:
+  [03 00 00 00] [01] [02] [03]
+   ^item count   ^item 0  ^item 2
+```
+
+**DynVec** (dynamic-size items): The header is the 4-byte total size, followed by one 4-byte offset per item. Items are stored after the offset table.
+
+```
+DynVec of two variable-size items:
+  [total_size 4B] [offset_0 4B] [offset_1 4B] [item_0 data...] [item_1 data...]
+```
+
+The item sizes are inferred from the gap between consecutive offsets (or between the last offset and total_size).
+
+In `.mol` schema files, both use the same `vector` keyword — the compiler determines which variant to use based on the item type:
+
+```mol
+vector Bytes <byte>;         // FixVec — byte is fixed-size
+vector BytesVec <Bytes>;     // DynVec — Bytes is variable-size
+vector TokenInfoVec <TokenInfo>;  // FixVec — TokenInfo struct is fixed-size
+```
+
+#### Dynamic-Size Type: table
+
+Tables are the Molecule equivalent of structs for dynamic data. Like structs, they have named fields in a fixed order. Unlike structs, they can contain fields of any type including variable-size ones.
+
+The binary format is identical to DynVec: a 4-byte total size, followed by 4-byte offsets for each field, followed by the field data.
+
+```mol
+table Script {
+    code_hash: Byte32,   // 32 bytes (fixed, but still gets an offset entry)
+    hash_type: byte,     // 1 byte
+    args:      Bytes,    // variable length
+}
+```
+
+Tables also support **schema evolution**: you can add new fields to the end of a table definition without breaking readers that only know about the old fields. Old readers ignore extra fields they do not recognize by stopping at the last offset they know about.
+
+#### Dynamic-Size Type: option
+
+An option is either absent (0 bytes) or present (the raw inner value). There is no tag byte — presence is determined entirely by whether there are any bytes.
+
+```mol
+option BytesOpt (Bytes);
+```
+
+```
+None:     (empty — 0 bytes)
+Some(x):  [x bytes...]
+```
+
+In tables, an option field's presence is determined by its offset range: if its offset equals the next field's offset (or total_size), it is absent; otherwise it is present.
+
+#### Dynamic-Size Type: union
+
+A union holds exactly one of several possible types, identified by a 4-byte little-endian tag called `item_id`. The tag is the 0-based index of the type in the union declaration.
+
+```mol
+union TokenAction {
+    TransferRecord,   // item_id = 0
+    TokenMetadata,    // item_id = 1
+    Bytes,            // item_id = 2
+}
+```
+
+```
+TokenAction::Burn (item_id=2):
+  [02 00 00 00] [burn data bytes...]
+   ^item_id
+```
+
+### Molecule Encoding Rules
+
+The complete encoding rules can be summarized:
+
+| Type | Header | Body |
+|------|--------|------|
+| `byte` | none | 1 byte value |
+| `array` | none | N items concatenated |
+| `struct` | none | fields concatenated in order |
+| `vector` (FixVec) | 4-byte item count (LE) | items concatenated |
+| `vector` (DynVec) | 4-byte total size + 4-byte offsets | items concatenated |
+| `table` | 4-byte total size + 4-byte offsets per field | fields concatenated |
+| `option` | none | empty for None, raw value for Some |
+| `union` | 4-byte item_id (LE) | inner value bytes |
+
+**All multi-byte integers are little-endian**. This matches CKB-VM's native byte order (RISC-V is little-endian), so on-chain scripts read integers directly from memory with no byte-swapping.
+
+### CKB's Built-in Molecule Schemas
+
+CKB defines all of its core data structures in `blockchain.mol`. These are the types you will encounter whenever you interact with the chain:
+
+```mol
+// The fundamental identifier for any on-chain script
+table Script {
+    code_hash: Byte32,   // Blake2b hash of the script code (or type_id)
+    hash_type: byte,     // 0x00=data, 0x01=type, 0x02=data1, 0x04=data2
+    args:      Bytes,    // Arguments passed to the script at execution time
+}
+
+// A cell output: the "envelope" of a cell (not including the data field)
+table CellOutput {
+    capacity: Uint64,    // Cell storage budget in shannons (1 CKB = 10^8 shannons)
+    lock:     Script,    // Lock script: determines who can spend this cell
+    type_:    ScriptOpt, // Optional type script: determines cell validity rules
+}
+
+// A reference to a specific existing cell
+struct OutPoint {
+    tx_hash: Byte32,   // The transaction that created the cell
+    index:   Uint32,   // Which output in that transaction
+}
+
+// An input to a transaction: which cell to consume plus a time-lock condition
+struct CellInput {
+    since:           Uint64,    // Time-lock (0 = no lock)
+    previous_output: OutPoint,  // The cell to consume
+}
+
+// The content of a transaction that gets signed
+table RawTransaction {
+    version:      Uint32,        // Transaction version (currently 0)
+    cell_deps:    CellDepVec,    // Scripts and data dependencies
+    header_deps:  Byte32Vec,     // Block header dependencies
+    inputs:       CellInputVec,  // Cells being consumed
+    outputs:      CellOutputVec, // Cells being created
+    outputs_data: BytesVec,      // Data for each output cell
+}
+
+// A complete signed transaction
+table Transaction {
+    raw:       RawTransaction,   // The transaction content
+    witnesses: BytesVec,         // Signatures and proofs
+}
+```
+
+### The `.mol` Schema Language
+
+Molecule schemas are written in `.mol` files using a simple syntax. The `moleculec` compiler reads these files and generates code for Rust, C, or JavaScript.
+
+```mol
+// Primitive alias
+array Byte32 [byte; 32];
+
+// Fixed-size struct
+struct Point {
+    x: Uint32,
+    y: Uint32,
+}
+
+// Variable-size vector
+vector Bytes <byte>;
+
+// Variable-size table (can have dynamic fields)
+table TokenMetadata {
+    name:        Bytes,
+    symbol:      Bytes,
+    decimals:    byte,
+    total_supply: Uint128,
+}
+
+// Optional value
+option BytesOpt (Bytes);
+
+// Tagged union
+union Payload {
+    Bytes,
+    TokenMetadata,
+}
+```
+
+Schema naming conventions: types use PascalCase, field names use snake_case. Type names must be globally unique within a schema.
+
+### Using Molecule in Rust with ckb-std
+
+In Rust CKB scripts, the `ckb-types` crate provides pre-generated types for all of CKB's built-in molecule schemas. The `molecule` crate provides the core traits.
+
+#### Reading CKB Built-in Types
+
+```rust
+use ckb_std::high_level::{load_script, load_cell_data};
+use ckb_std::ckb_constants::Source;
+use ckb_types::{packed::{Script, Bytes as PackedBytes}, prelude::*};
+use molecule::prelude::*;
+
+// Load the currently executing script (returns a molecule Script)
+let script: Script = load_script().unwrap();
+
+// Access fields using generated accessor methods
+let code_hash = script.code_hash();   // returns Byte32
+let hash_type: u8 = script.hash_type().into();
+let args: PackedBytes = script.args();  // variable-length Bytes
+```
+
+#### Reading Cell Data (Manual Molecule)
+
+For fixed-size types like structs, you can read fields directly from the raw bytes without using generated code:
+
+```rust
+// Load raw cell data
+let cell_data: Vec<u8> = load_cell_data(0, Source::GroupOutput).unwrap();
+
+// TokenInfo struct layout (fixed offsets):
+// name:         bytes[0..32]
+// symbol:       bytes[32..64]
+// decimals:     bytes[64]
+// total_supply: bytes[65..81]
+
+if cell_data.len() != 81 {
+    return Err(ERROR_INVALID_LENGTH);
+}
+
+let decimals = cell_data[64];  // direct byte read — no parsing
+
+let supply_bytes: [u8; 16] = cell_data[65..81].try_into().unwrap();
+let total_supply = u128::from_le_bytes(supply_bytes);  // LE conversion
+```
+
+#### Using the Molecule Allocator
+
+CKB scripts that need heap memory (for `Vec`, `String`, etc.) must set up an allocator. `ckb_std` provides a simple bump allocator:
+
+```rust
+#![no_std]
+#![no_main]
+
+use ckb_std::default_alloc;
+ckb_std::entry!(main);
+default_alloc!(4 * 1024, main);  // 4KB heap
+```
+
+### Working with Molecule in TypeScript
+
+Off-chain code needs to encode and decode the same byte formats that on-chain scripts use. You have several options:
+
+**Option 1: Hand-coded helpers** — implement the encoding rules directly for full control and visibility into the byte layout. This is what this lesson's `molecule-types.ts` does.
+
+**Option 2: `@ckb-lumos/codec`** — the Lumos SDK includes molecule codec utilities and can define codecs programmatically.
+
+**Option 3: `@ckb-ccc/core`** — the CCC SDK handles all built-in CKB types (Script, CellOutput, Transaction) automatically. Most application code only needs to work with custom data types.
+
+**Option 4: `moleculec-es`** — the Molecule compiler for JavaScript generates TypeScript/JavaScript from `.mol` schema files. Run: `moleculec-es -i schema.mol -o generated.ts`.
+
+#### Encoding a Struct (TokenInfo)
+
+```typescript
+function encodeTokenInfo(info: TokenInfo): Uint8Array {
+  const buf = new Uint8Array(81);
+
+  // name: Byte32 — UTF-8 string right-padded to 32 bytes
+  const nameBytes = new TextEncoder().encode(info.name);
+  buf.set(nameBytes.slice(0, 32), 0);
+
+  // symbol: Byte32 — same padding
+  const symbolBytes = new TextEncoder().encode(info.symbol);
+  buf.set(symbolBytes.slice(0, 32), 32);
+
+  // decimals: byte at offset 64
+  buf[64] = info.decimals;
+
+  // total_supply: Uint128 little-endian at offset 65
+  const buf128 = new Uint8Array(16);
+  let val = info.totalSupply;
+  for (let i = 0; i < 16; i++) {
+    buf128[i] = Number(val & 0xffn);
+    val >>= 8n;
+  }
+  buf.set(buf128, 65);
+
+  return buf;
+}
+```
+
+#### Encoding a Table (Script)
+
+Tables use the same binary layout as DynVec: total_size + per-field offsets + field data:
+
+```typescript
+function encodeScript(codeHash: Uint8Array, hashType: number, args: Uint8Array): Uint8Array {
+  // Fields: code_hash (32 bytes), hash_type (1 byte), args (FixVec)
+  const argsVec = encodeFixVec([args]);  // wrap args as FixVec<byte>
+
+  const headerSize = 4 + 3 * 4;  // total_size + 3 offsets
+  const totalSize = headerSize + 32 + 1 + argsVec.length;
+
+  const buf = new Uint8Array(totalSize);
+  const view = new DataView(buf.buffer);
+
+  view.setUint32(0, totalSize, true);           // total_size (LE)
+  view.setUint32(4, headerSize, true);          // offset[0] = code_hash start
+  view.setUint32(8, headerSize + 32, true);     // offset[1] = hash_type start
+  view.setUint32(12, headerSize + 32 + 1, true);// offset[2] = args start
+
+  buf.set(codeHash, headerSize);
+  buf[headerSize + 32] = hashType;
+  buf.set(argsVec, headerSize + 33);
+
+  return buf;
+}
+```
+
+### Code Generation from .mol Schemas
+
+For any non-trivial project you should use `moleculec` to generate code from your `.mol` files rather than writing serialization by hand.
+
+**Rust code generation** (via `build.rs`):
+
+```rust
+// build.rs
+fn main() {
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    let schemas = ["schemas/custom.mol"];
+
+    for schema in &schemas {
+        println!("cargo:rerun-if-changed={}", schema);
+        let output = std::process::Command::new("moleculec")
+            .args(&["--language", "rust", "--schema-file", schema])
+            .output()
+            .expect("moleculec not found");
+
+        std::fs::write(
+            format!("{}/{}.rs", out_dir, schema.replace("/", "_").replace(".mol", "")),
+            output.stdout,
+        ).unwrap();
+    }
+}
+```
+
+**JavaScript/TypeScript code generation**:
+
+```bash
+npm install -g moleculec-es
+moleculec-es -i schemas/custom.mol -o src/generated/custom.ts
+```
+
+## Step-by-Step Project Walkthrough
+
+### Project Structure
+
+```
+lessons/11-molecule-serialization/
+  schemas/
+    custom.mol              — Custom molecule type definitions
+  contracts/
+    molecule-demo/
+      src/main.rs           — Rust type script validating molecule cell data
+  scripts/
+    src/
+      index.ts              — TypeScript encoding/decoding demos
+      molecule-types.ts     — Hand-coded molecule helpers
+```
+
+### The Schema: `schemas/custom.mol`
+
+The schema defines all the custom types used in this lesson, organized by type category:
+
+**Arrays** (fixed-size byte sequences):
+```mol
+array Byte32 [byte; 32];    // 32-byte hash — used everywhere in CKB
+array Uint32 [byte; 4];     // 4-byte little-endian unsigned integer
+array Uint64 [byte; 8];     // 8-byte little-endian unsigned integer
+array Uint128 [byte; 16];   // 16-byte little-endian (for token balances)
+```
+
+**Struct** (fixed-size composite — 81 bytes total):
+```mol
+struct TokenInfo {
+    name:         Byte32,    // Token name, right-padded with 0x00
+    symbol:       Byte32,    // Token symbol, right-padded with 0x00
+    decimals:     byte,      // Decimal places (e.g., 8 for CKB)
+    total_supply: Uint128,   // Total supply in base units
+}
+```
+
+**Vectors** — both FixVec and DynVec variants:
+```mol
+vector Bytes <byte>;             // FixVec — byte string
+vector Byte32Vec <Byte32>;       // FixVec — list of hashes
+vector BytesVec <Bytes>;         // DynVec — list of byte strings
+vector TokenInfoVec <TokenInfo>; // FixVec — list of token info structs
+```
+
+**Table** (variable-size composite):
+```mol
+table TokenMetadata {
+    name:         Bytes,    // Variable-length name string
+    symbol:       Bytes,    // Variable-length symbol string
+    decimals:     byte,     // Fixed-size field in a dynamic table
+    total_supply: Uint128,  // Fixed-size field in a dynamic table
+    description:  Bytes,    // Optional description text
+    website:      Bytes,    // Optional website URL
+}
+```
+
+**Option** and **Union**:
+```mol
+option BytesOpt (Bytes);
+option TokenMetadataOpt (TokenMetadata);
+
+union TokenAction {
+    TransferRecord,   // item_id = 0
+    TokenMetadata,    // item_id = 1
+    Bytes,            // item_id = 2 (burn)
+}
+```
+
+### The Rust Contract: `contracts/molecule-demo/src/main.rs`
+
+The Rust contract acts as a type script that validates `TokenInfo`-encoded cell data:
+
+**Step 1**: Load the currently executing script to inspect its own args:
+
+```rust
+let script = high_level::load_script().map_err(|_| Error::LoadScriptFailed)?;
+let args: PackedBytes = script.args();
+// args could specify the creator's address or other parameters
+```
+
+**Step 2**: Iterate over all output cells in the script group and validate each one:
+
+```rust
+let mut output_index: usize = 0;
+loop {
+    let cell_data = match high_level::load_cell_data(output_index, Source::GroupOutput) {
+        Ok(data) => data,
+        Err(_) => break,  // no more outputs in group
+    };
+    // validate cell_data as TokenInfo...
+    output_index += 1;
+}
+```
+
+**Step 3**: Validate the TokenInfo layout using zero-copy field access. Since `TokenInfo` is a struct (fixed size), validation is just a length check followed by field reads:
+
+```rust
+if cell_data.len() != TOKEN_INFO_SIZE {  // TOKEN_INFO_SIZE = 81
+    return Err(Error::InvalidDataLength);
+}
+
+let name_bytes = &cell_data[0..32];
+if name_bytes.iter().all(|&b| b == 0) {
+    return Err(Error::EmptyName);  // name cannot be all zeros
+}
+
+let decimals = cell_data[64];
+if decimals > MAX_DECIMALS {
+    return Err(Error::InvalidDecimals);
+}
+
+let supply = u128::from_le_bytes(cell_data[65..81].try_into().unwrap());
+if supply == 0 {
+    return Err(Error::ZeroTotalSupply);
+}
+```
+
+**Step 4**: Optionally load the cell's capacity using the high-level API, which handles the `CellOutput` molecule deserialization:
+
+```rust
+let capacity = high_level::load_cell_capacity(output_index, Source::GroupOutput)
+    .map_err(|_| Error::LoadDataFailed)?;
+```
+
+### The TypeScript Demo: `scripts/src/index.ts`
+
+The TypeScript demo walks through every Molecule type with byte-level visualizations:
+
+**Part 1** — Encoding and decoding a `byte` and `Byte32`:
+```typescript
+const nameBytes = packByte32FromString("CKB");
+// "CKB" as UTF-8 = [0x43, 0x4b, 0x42], then 29 zero bytes
+// Result: 0x434b420000000000000000000000000000000000000000000000000000000000
+```
+
+**Part 2** — Encoding the `TokenInfo` struct (81 bytes):
+```typescript
+const packed = packTokenInfo({
+  name: "Nervos CKByte",
+  symbol: "CKB",
+  decimals: 8,
+  totalSupply: 33_600_000_000_00000000n,
+});
+// packed.length === 81 — always, for any TokenInfo
+```
+
+**Part 3** — DynVec encoding for variable-size items:
+```typescript
+// DynVec of two strings "hi" and "hello"
+// [12 bytes header: total=28, off0=12, off1=19] [hi as FixVec] [hello as FixVec]
+const dynVec = packDynVec([encode("hi"), encode("hello")]);
+```
+
+**Part 4** — Format comparison showing Molecule's size advantage over JSON.
+
+**Part 5** — Encoding a real CKB `Script` as a molecule table, with header breakdown showing total_size and field offsets.
+
+**Part 6** — Complete encode-decode round trip demonstration.
+
+**Part 7** — Zero-copy access: reading individual fields directly from byte offsets without full deserialization.
+
+### The Helper Library: `scripts/src/molecule-types.ts`
+
+This file implements all Molecule encoding and decoding by hand so you can see exactly how each type works at the byte level. Key functions:
+
+| Function | Purpose |
+|----------|---------|
+| `packTokenInfo` / `unpackTokenInfo` | Struct encode/decode (81 bytes) |
+| `packFixVec` / `unpackFixVec` | Fixed-size item vector |
+| `packDynVec` / `unpackDynVec` | Variable-size item vector |
+| `packTable` / `unpackTable` | Table (same format as DynVec) |
+| `packOption` / `unpackOption` | Optional value |
+| `packUnion` / `unpackUnion` | Tagged union |
+| `packScript` / `unpackScript` | CKB Script molecule table |
+| `writeUint32LE`, `writeUint64LE`, `writeUint128LE` | Little-endian integer encoding |
+| `hexDump` | Annotated hex display for learning |
+
+## Format Comparison: Molecule vs JSON vs Protobuf
+
+To make the size and property differences concrete, consider encoding this token record:
+
+```
+{ name: "CKB", symbol: "CKB", decimals: 8, totalSupply: 33600000000 }
+```
+
+| Format | Size | Canonical | Zero-copy | Schema |
+|--------|------|-----------|-----------|--------|
+| JSON | ~80 bytes | No | No | Implicit |
+| Protobuf | ~35 bytes | No | Partial | .proto |
+| Molecule (struct) | 81 bytes | Yes | Yes | .mol |
+
+Molecule's struct is larger than Protobuf here because the name and symbol fields are padded to 32 bytes each (to keep the struct fixed-size). Using a table with `Bytes` fields for name and symbol would produce a smaller encoding, but with a header overhead. The key point is not absolute size but correctness: Molecule is canonical, meaning the same data always produces the same bytes.
+
+## Running the Code
+
+### Run the TypeScript Demo
+
+```bash
+cd lessons/11-molecule-serialization/scripts
+npm install
+npx tsx src/index.ts
+```
+
+The output walks through every section with annotated hex dumps showing the byte layout.
+
+### Build and Run the Rust Contract
+
+```bash
+cd lessons/11-molecule-serialization/contracts/molecule-demo
+rustup target add riscv64imac-unknown-none-elf
+cargo build --release --target riscv64imac-unknown-none-elf
+
+# Test with ckb-debugger
+ckb-debugger --bin target/riscv64imac-unknown-none-elf/release/molecule-demo
+```
+
+## Common Patterns and Gotchas
+
+**Little-endian everywhere**: All Molecule integers use little-endian byte order. Number `0x01020304` encodes as `[04 03 02 01]`. If you are used to big-endian (network byte order), watch out — this is the most common source of encoding bugs.
+
+**Struct vs Table**: Use a struct when all fields are fixed-size and you do not need schema evolution. Use a table when you need variable-length fields or plan to add fields in the future. Structs are more efficient (no header) but less flexible.
+
+**Empty vector encodings differ**: An empty FixVec is `[00 00 00 00]` (4 bytes — zero item count). An empty DynVec is `[04 00 00 00]` (4 bytes — total_size equals 4, the size of the header itself). This asymmetry is intentional and important to get right.
+
+**Option encodes as raw value**: `Some(x)` for an option encodes as just the raw bytes of `x` — there is no tag byte. `None` encodes as 0 bytes. The reader must know from context whether to interpret a field as an option or a required field.
+
+**Table schema evolution**: You can safely add new fields to the END of a table without breaking old readers. Old readers see extra bytes after the last field they know about and ignore them. You can never remove or reorder existing fields without breaking all existing readers.
+
+## Summary
+
+In this lesson, you learned:
+
+- **Molecule** is CKB's deterministic binary serialization format, used for all on-chain data
+- **Canonicalization** means the same data always produces the same bytes — essential for hashing
+- **Zero-copy access** lets scripts read individual fields directly from byte offsets without full deserialization
+- **Seven types**: byte (primitive), array and struct (fixed-size), vector, table, option, and union (dynamic)
+- **Fixed-size types** have no headers — they are exactly `N` bytes
+- **Dynamic-size types** carry a header with total size and/or per-field offsets
+- **All integers** are little-endian, matching RISC-V native byte order
+- **CKB's built-in types** (Script, CellOutput, Transaction) are all defined using Molecule in `blockchain.mol`
+- **Schemas** are defined in `.mol` files and code is generated for Rust, C, or JavaScript
+- **Struct fields** can be read at known byte offsets with no parsing overhead
+
+## What's Next
+
+In the next lesson, you will take a deep dive into **CKB-VM** — the RISC-V virtual machine that executes every CKB script. You will learn about the rv64imc instruction set, how cycles are counted, all available syscalls, and optimization strategies for writing efficient on-chain scripts.

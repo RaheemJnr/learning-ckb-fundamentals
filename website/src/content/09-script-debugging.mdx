@@ -1,0 +1,583 @@
+# Debugging CKB Scripts
+
+## Overview
+
+Debugging CKB scripts is fundamentally different from debugging traditional applications. When a script running on CKB fails, you receive an exit code and nothing else — no stack trace, no error message, no line number. Scripts run inside a deterministic, sandboxed RISC-V virtual machine that has no network access, no filesystem, and no standard output. Understanding how to systematically interpret error codes, reproduce failures locally, and trace execution is an essential skill for every CKB developer.
+
+In this lesson, you will work with an intentionally buggy lock script that contains four common mistakes found in real CKB script development. You will learn the tools and methodology to find and fix each one.
+
+By the end of this lesson, you will be able to:
+
+- Explain why CKB script debugging requires specialized tools and techniques
+- Distinguish between VM-level error codes (from CKB-VM) and script-level error codes (from your script)
+- Install and use CKB-Debugger to run scripts locally against mock transactions
+- Use the `ckb_debug!` macro to add print-style debugging to on-chain scripts
+- Follow a systematic 5-step debugging methodology
+- Identify the four most common CKB lock script bugs by category
+- Design tests that catch bugs that happy-path testing misses
+
+## Prerequisites
+
+- Completion of Lessons 1-8 (especially Lesson 7: Script Basics and Lesson 8: Hash Lock Script)
+- Node.js 18+ installed
+- Familiarity with Rust syntax (for reading and modifying script source)
+- Basic understanding of CKB transaction structure and witnesses
+
+## Concepts
+
+### Why CKB Script Debugging Is Different
+
+Traditional applications run in an environment that is generous with debugging information: you get stack traces, log files, interactive debuggers, and the ability to attach a debugger process at any time. CKB scripts operate under fundamentally different constraints.
+
+**Deterministic execution**: CKB-VM is a fully deterministic RISC-V virtual machine. Given identical inputs, it always produces the same output. There is no non-determinism from the environment — no system clocks, no random number generators from the OS, no I/O side effects. This is a feature for consensus, but it means there is no "run it again and see what happens differently."
+
+**Sandboxed execution**: A script cannot access the network, the filesystem, or any external state beyond what the transaction provides. This prevents oracle dependencies and ensures every node reaches the same result. However, it also means you cannot log to a file, make an HTTP request to a debugging service, or read environment variables.
+
+**Exit-code-only interface**: Scripts communicate the result of verification through a single i8 exit code. Code `0` means success. Any non-zero value means failure. The CKB node reports which script failed and what code it returned — that is the entirety of the error information available when a transaction is rejected on-chain.
+
+**On-chain finality**: Once you deploy a script to mainnet and cells are locked with it, the script is immutable. You cannot patch it in place. A bug in a deployed lock script could permanently prevent the locked cells from being spent, or worse, allow anyone to spend them. Thorough pre-deployment debugging is not optional.
+
+These constraints make CKB script debugging a discipline of its own. The tools and methodology in this lesson exist specifically to work within these constraints.
+
+### The Two Layers of Error Codes
+
+When a CKB transaction fails script verification, you see an exit code. That code comes from one of two sources, and knowing which source immediately narrows the problem space.
+
+**VM-level errors (negative numbers)**: These are returned by CKB-VM itself when a syscall encounters a structural problem. They are always negative integers. They indicate infrastructure-level failures — the VM could not service a request — rather than logic failures in your script.
+
+**Script-level errors (positive numbers)**: These are returned by your script code. You define what each positive code means. They indicate that your script ran successfully to completion, evaluated the transaction, and decided to reject it for a specific reason.
+
+When you see a negative exit code, look at CKB-VM syscall documentation to understand what the VM encountered. When you see a positive exit code, look at your script's error code constants.
+
+### CKB-VM Error Code Reference
+
+| Code | Name | Description | Common Causes |
+|------|------|-------------|---------------|
+| -1 | INDEX_OUT_OF_BOUND | A syscall tried to access an index that does not exist | Loading a witness at an index where no witness was provided; off-by-one errors in loop counters iterating over inputs |
+| -2 | ITEM_MISSING | The item at the index exists but the requested field is absent | Loading the type script of a cell that has no type script (type is optional); accessing an optional Molecule field that was set to None |
+| -3 | SLICE_OUT_OF_BOUND | A partial load attempted to read beyond the available data | Specifying offset + length that exceeds the data size; reading a fixed number of bytes from data that is shorter than expected |
+| -4 | WRONG_FORMAT | Data could not be parsed in the expected Molecule format | Witness bytes are not valid WitnessArgs Molecule encoding; data was constructed incorrectly |
+| -5 | UNKNOWN_SYSCALL | The script called a syscall number the VM does not recognize | Script compiled with a newer ckb-std version that uses syscalls not available on the target chain |
+| -6 | UNALIGNED_SYSCALL | A syscall was called with unaligned memory addresses | Low-level memory manipulation without correct alignment; use `default_alloc!()` instead of custom allocators |
+| -7 | MAX_VMS_SPAWNED | Too many child VMs were spawned | Recursive spawning without a termination condition (CKB 2023 Meepo feature) |
+| -8 | MAX_FDS_CREATED | Too many pipe file descriptors created | Creating inter-VM communication pipes without closing them |
+
+### CKB Node Error Codes
+
+These appear in the RPC response when a transaction fails before or during script execution:
+
+| Code | Name | Description |
+|------|------|-------------|
+| -301 | TransactionFailedToResolve | An input cell or cell_dep OutPoint does not exist or has already been spent |
+| -302 | TransactionFailedToVerify | A script returned a non-zero exit code — the most common error during development |
+| -303 | PoolRejectedDuplicatedTransaction | A transaction with the same hash is already in the pool |
+| -304 | PoolIsFull | The transaction pool is at capacity; increase the fee |
+| -311 | PoolRejectedMalformedTransaction | The transaction structure is invalid (capacity too small, outputs exceed inputs, etc.) |
+| -312 | PoolRejectedDuplicatedOutputs | The transaction creates cells that conflict with existing unique cells |
+
+When you see error `-302`, the error message will identify the specific failing script and its exit code:
+
+```
+TransactionFailedToVerify: Verification failed Script(
+  TransactionScriptError {
+    source: Inputs[0].Lock,
+    cause: script exit code: 3
+  }
+)
+```
+
+This tells you: the lock script of input 0 ran and returned exit code 3. You now look up what code 3 means in your script's error definitions.
+
+### The `ckb_debug!` Macro
+
+Since scripts have no stdout, the `ckb_debug!` macro is the primary tool for print-style debugging. It works through a special debug syscall that writes to stderr when running under CKB-Debugger. On a real CKB node, the debug output is discarded, but the cycles for the syscall are still consumed.
+
+`ckb_debug!` is provided by `ckb-std` and supports the same format string syntax as Rust's `println!`:
+
+```rust
+use ckb_std::debug;
+
+pub fn program_entry() -> i8 {
+    // Simple message
+    debug!("script execution started");
+
+    // Format variables
+    let args_len = args.len();
+    debug!("args length: {}", args_len);
+
+    // Print hex bytes for comparison
+    debug!("first 4 bytes: {:02x}{:02x}{:02x}{:02x}",
+        args[0], args[1], args[2], args[3]);
+
+    // Trace control flow
+    if some_condition {
+        debug!("taking the success path");
+        return 0;
+    }
+
+    debug!("taking the error path, returning 1");
+    1
+}
+```
+
+**Best practices for `ckb_debug!`:**
+
+1. Add a script name prefix to every message (e.g., `"my-lock: ..."`) so you can tell which script produced which line when multiple scripts run in the same transaction
+2. Print the length of every loaded data buffer before using it — many bugs come from unexpected lengths
+3. Print which branch the code takes at every `if` or `match` — this traces the execution path
+4. Print the first few bytes of hashes in hex for manual comparison
+5. Print index values before using them in syscalls — wrong indices are a common bug category
+6. `ckb_debug!` consumes approximately 2,000 cycles per call, which is negligible for development but worth removing in production scripts with tight cycle budgets
+
+**Conditional compilation for production:**
+
+```rust
+// Only include debug prints in debug builds
+#[cfg(debug_assertions)]
+debug!("this only appears in debug builds");
+
+// Or gate behind a feature flag
+#[cfg(feature = "debug-output")]
+debug!("this only appears when feature is enabled");
+```
+
+### CKB-Debugger
+
+CKB-Debugger is a command-line tool that simulates the CKB-VM environment locally. You provide a transaction in JSON format and specify which script to run. The debugger executes the script against the mock transaction data, prints any `ckb_debug!` output to stderr, reports the exit code, and counts the cycles consumed.
+
+This lets you iterate on script bugs at the speed of local compilation rather than waiting for on-chain transactions.
+
+**Installation:**
+
+```bash
+# Install via Cargo (requires Rust toolchain)
+cargo install ckb-debugger
+
+# Or download a prebuilt binary from:
+# https://github.com/nervosnetwork/ckb-standalone-debugger/releases
+```
+
+**Basic usage:**
+
+```bash
+# Run the lock script of input 0 from a mock transaction file
+ckb-debugger \
+  --tx-file tx.json \
+  --script-group-type lock \
+  --cell-index 0
+
+# Run with a locally compiled debug binary (faster iteration than on-chain lookup)
+ckb-debugger \
+  --tx-file tx.json \
+  --script-group-type lock \
+  --cell-index 0 \
+  --bin ./target/riscv64imac-unknown-none-elf/debug/my-lock-script
+
+# Run with debug output enabled and a higher cycle limit
+ckb-debugger \
+  --tx-file tx.json \
+  --script-group-type lock \
+  --cell-index 0 \
+  --bin ./build/debug/my-script \
+  --max-cycles 70000000
+```
+
+**Key flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--tx-file <path>` | Path to the mock transaction JSON file |
+| `--script-group-type lock\|type` | Whether to run the lock or type script |
+| `--cell-index <N>` | Which input cell's script to execute (0-based) |
+| `--bin <path>` | Use a local binary instead of looking up the script from cell deps |
+| `--max-cycles <N>` | Maximum cycle limit (default is usually enough for testing) |
+
+**Reading the output:**
+
+```
+# Successful execution:
+Run result: 0
+Total cycles consumed: 5234
+
+# Failed execution with exit code 3:
+DEBUG: my-lock: script execution started
+DEBUG: my-lock: loaded args, length = 32
+DEBUG: my-lock: hash comparison FAILED
+Run result: 3
+```
+
+**Mock transaction JSON format:**
+
+The `--tx-file` JSON has two top-level keys:
+
+```json
+{
+  "mock_info": {
+    "inputs": [],
+    "cell_deps": [],
+    "header_deps": []
+  },
+  "tx": {
+    "version": "0x0",
+    "cell_deps": [],
+    "header_deps": [],
+    "inputs": [],
+    "outputs": [],
+    "outputs_data": [],
+    "witnesses": []
+  }
+}
+```
+
+The `mock_info` section provides the full data for cells referenced by the transaction (since the debugger does not have access to a running CKB node). The `tx` section contains the actual transaction structure being verified.
+
+## Debugging Methodology
+
+A systematic approach prevents the common trap of making random changes and hoping something works. Follow these five steps in order.
+
+### Step 1: Read the Error
+
+Before touching any code, fully understand the error. Identify:
+
+- **Which script failed**: Look for `Inputs[N].Lock`, `Inputs[N].Type`, or `Outputs[N].Type` in the error message
+- **What code was returned**: Negative codes are VM errors; positive codes are script-defined errors
+- **What that code means**: Check your script's error constant definitions for positive codes; check the VM error table above for negative codes
+
+For error `-302 TransactionFailedToVerify` with `script exit code: 3`, go look up what code 3 means in the failing script.
+
+### Step 2: Reproduce Locally
+
+Get the failing transaction into a JSON file that CKB-Debugger can use. Then verify you can reproduce the same exit code locally before changing anything. This step confirms your debugging environment is set up correctly.
+
+```bash
+# Confirm you get the same error locally
+ckb-debugger --tx-file failing-tx.json --script-group-type lock --cell-index 0
+# Should print: Run result: 3 (or whatever code you saw on-chain)
+```
+
+If you get a different result locally, your mock transaction does not accurately represent what happened on-chain. Fix the mock before proceeding.
+
+### Step 3: Add Debug Prints
+
+Recompile the script with `ckb_debug!` calls added at key checkpoints:
+
+- At the very start: confirm the script is reached
+- After each data load: print the length and first few bytes
+- At each branch point: print which path was taken
+- Before each return statement: print the return value
+
+Run under CKB-Debugger with `--bin` pointing to your locally compiled debug binary. Read the debug output to trace the execution path.
+
+### Step 4: Isolate the Bug
+
+Once you can see the execution trace, narrow in on the divergence point — where actual behavior differs from expected. Questions to ask:
+
+- Is a length wrong? (Off-by-one, reading the wrong range)
+- Is an index wrong? (Accessing position 1 when position 0 was intended)
+- Is a comparison truncated? (Comparing fewer bytes than the hash contains)
+- Is an error path missing a return statement? (Falling through to an incorrect value)
+
+Check your assumptions about data layout, encoding, and which index corresponds to which item.
+
+### Step 5: Fix and Verify
+
+Apply the minimal targeted fix. Then test:
+
+1. Run the same failing transaction — confirm the error is gone
+2. Run a transaction that should fail — confirm it still fails with the correct code
+3. Test boundary conditions (minimum length data, maximum index, etc.)
+
+Never skip negative testing. The most dangerous category of bug is one that causes a script to return success when it should fail.
+
+## The Four Common Bugs in Buggy Lock Scripts
+
+The lesson project includes `contracts/buggy-lock/src/main.rs`, a hash lock script with four intentional bugs. These bugs represent the most common categories of mistakes in CKB script development. Study each one to build pattern recognition.
+
+### Bug 1: Off-by-One in Args Reading
+
+**Buggy code:**
+```rust
+let expected_hash = &args[1..BLAKE2B_HASH_LEN + 1];
+//                           ^ starts at 1 instead of 0
+```
+
+**What goes wrong:**
+
+The script reads bytes 1 through 33 instead of bytes 0 through 32. The intended 32-byte blake2b hash is shifted by one byte. If args is exactly 32 bytes, this panics with an out-of-bounds access (manifesting as a VM error). If args is longer, the script silently compares the wrong hash, causing `ERROR_HASH_MISMATCH` even when the correct preimage is provided.
+
+**How to find it:**
+
+Add a debug print showing the first 4 bytes of `expected_hash`. Compare manually with the hash you put in args. The first byte will differ — it is the second byte of args, not the first.
+
+**The fix:**
+```rust
+let expected_hash = &args[0..BLAKE2B_HASH_LEN];
+```
+
+### Bug 2: Wrong Witness Index
+
+**Buggy code:**
+```rust
+let witness = match load_witness(1, Source::Input) {
+//                               ^ index 1 instead of 0
+```
+
+**What goes wrong:**
+
+In CKB, witness indices correspond to input indices: witness 0 belongs to input 0, witness 1 belongs to input 1, and so on. Loading witness at index 1 when verifying input 0 either: loads the wrong witness if a second witness exists, or fails with `INDEX_OUT_OF_BOUND` (-1) if there is only one witness.
+
+The symptom differs depending on the transaction structure. A single-witness transaction produces a VM error immediately. A multi-witness transaction produces a hash mismatch (the second witness data is hashed instead of the first).
+
+**How to find it:**
+
+If the exit code is -1, suspect a wrong index. Add a debug print before the `load_witness` call showing the index being used. For a more robust implementation, use `Source::GroupInput` with index 0, which automatically selects the witness corresponding to the current script group's first input.
+
+**The fix:**
+```rust
+let witness = match load_witness(0, Source::Input) {
+```
+
+### Bug 3: Incorrect Hash Comparison Length
+
+**Buggy code:**
+```rust
+let compare_len = 20; // Should be BLAKE2B_HASH_LEN (32)
+```
+
+**What goes wrong:**
+
+A blake2b-256 hash is 32 bytes. This comparison checks only the first 20 bytes, leaving 12 bytes (96 bits) completely unchecked. Functionally, the script appears to work correctly in basic tests — different preimages still produce different first 20 bytes and fail the comparison. But this is a security vulnerability: an attacker only needs to find a preimage whose first 20 bytes of its hash collide with the target, which reduces the security level from 256 bits to 160 bits.
+
+This bug is subtle precisely because it does not cause functional failures on the happy path or in simple error-path tests. It requires a specific adversarial test case to expose: provide a preimage whose hash shares the first 20 bytes with the target hash but differs in the remaining 12 bytes.
+
+**How to find it:**
+
+Code review is the most reliable way. When you see a hard-coded length constant in a comparison, always verify it matches the expected data size. Add a debug print showing `compare_len` and `BLAKE2B_HASH_LEN` side by side to confirm they match.
+
+**The fix:**
+```rust
+let compare_len = BLAKE2B_HASH_LEN; // 32
+```
+
+### Bug 4: Missing Error Return After Hash Mismatch
+
+**Buggy code:**
+```rust
+debug!("buggy-lock: hash comparison FAILED");
+
+// The fix: return ERROR_HASH_MISMATCH
+// ERROR_HASH_MISMATCH
+0 // This incorrectly returns success even when the hash doesn't match!
+```
+
+**What goes wrong:**
+
+When the hash comparison fails, execution falls through to a final `0` return, which signals success to CKB. The lock script becomes an "anyone can spend" lock — any transaction can consume the locked cell regardless of whether it provides the correct preimage.
+
+This is the most dangerous bug in the set because:
+
+1. Happy-path testing passes: When you test with the correct preimage, the comparison succeeds and the script returns `0` before reaching the bug
+2. The comparison logic is correct: The code correctly identifies a mismatch — it just fails to act on it
+3. The consequence is total: The lock provides zero security
+
+**How to find it:**
+
+Always test with an incorrect preimage. If the script returns `0` when it should reject, look for missing error returns at every point where the comparison fails. Add a debug print showing the return value just before exiting.
+
+**The fix:**
+```rust
+debug!("fixed-lock: hash comparison FAILED");
+ERROR_HASH_MISMATCH // Return error code 3
+```
+
+## Testing CKB Scripts Before Deployment
+
+Testing CKB scripts requires more care than testing typical software because bugs can have irreversible on-chain consequences. Use all of the following testing layers.
+
+### Positive Tests (Happy Path)
+
+Confirm the script returns `0` with correct inputs. This is the minimum test but alone is not sufficient — it catches broken logic but misses security bugs like Bug 4.
+
+### Negative Tests (Error Paths)
+
+Test every error code your script can return by constructing inputs that trigger each failure mode. This is what catches Bug 4.
+
+For the hash lock:
+
+| Test case | Expected exit code | Bug it would catch |
+|-----------|-------------------|--------------------|
+| Correct preimage | 0 | Basic logic |
+| Wrong preimage | 3 (ERROR_HASH_MISMATCH) | Bug 4 (missing return) |
+| Empty witness | 2 (ERROR_WITNESS_MISSING) | Error handling |
+| No witness provided | -1 (INDEX_OUT_OF_BOUND) | Bug 2 (wrong index) |
+| Args exactly 32 bytes | 0 | Bug 1 (off-by-one panics) |
+| Args exactly 31 bytes | 1 (ERROR_ARGS_TOO_SHORT) | Args validation |
+| Preimage differs only in last 12 bytes | 3 | Bug 3 (partial comparison) |
+
+### Boundary Tests
+
+Test at the edges of expected input sizes. Off-by-one bugs (Bug 1) typically appear exactly at boundary conditions: args with length exactly equal to the expected minimum, witnesses with length exactly zero.
+
+### Index Tests
+
+Test with different numbers of inputs, outputs, and witnesses. Wrong index bugs (Bug 2) appear when the transaction has exactly one witness (causing `INDEX_OUT_OF_BOUND` when index 1 is requested) but may be masked when two witnesses are present.
+
+### CKB-Debugger Mock Transaction Tests
+
+Create a JSON file for each test case and run the script binary against it with CKB-Debugger. Check the exit code against the expected value. This approach is faster than deploying to testnet and gives deterministic results.
+
+### Unit Tests in Rust
+
+Test helper functions like `blake2b_hash()` in isolation using Rust's standard test framework. These tests do not require CKB-VM and run with `cargo test`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_blake2b_hash_is_32_bytes() {
+        let result = blake2b_hash(b"hello");
+        assert_eq!(result.len(), 32);
+    }
+
+    #[test]
+    fn test_blake2b_hash_matches_expected() {
+        let data = b"secret-preimage";
+        let hash = blake2b_hash(data);
+        // The expected value was computed off-chain with CKB's personalization
+        let expected: [u8; 32] = [/* known value */
+            0x00, 0x00, /* ... */
+        ];
+        assert_eq!(hash, expected);
+    }
+}
+```
+
+### Integration Tests on Devnet
+
+For end-to-end validation, deploy to a local CKB devnet and run real transactions:
+
+```bash
+# Initialize and start a devnet
+ckb init --chain dev -C /tmp/ckb-devnet
+ckb run -C /tmp/ckb-devnet
+
+# Start the block miner in another terminal
+ckb miner -C /tmp/ckb-devnet
+```
+
+This is the final validation before testnet deployment and catches any issues with how the script interacts with the full CKB protocol, including molecule encoding of transaction structures.
+
+## Step-by-Step Project Walkthrough
+
+### Step 1: Install Dependencies
+
+```bash
+cd lessons/09-script-debugging/scripts
+npm install
+```
+
+### Step 2: Run the Debugging Walkthrough
+
+The main TypeScript script walks through all seven sections of this lesson interactively:
+
+```bash
+npm start
+# or: npx tsx src/index.ts
+```
+
+Output covers:
+- CKB-VM error codes (negative) and their common causes
+- The 5-step debugging methodology in detail
+- CKB-Debugger command reference with example flags
+- How to parse error output from failed transactions
+- The `ckb_debug!` macro setup and usage tips
+- A full walkthrough of all four bugs in the buggy-lock script
+- Testing strategies with an annotated test matrix
+
+### Step 3: Study the Error Code Reference
+
+```bash
+npm run errors
+# or: npx tsx src/error-guide.ts
+```
+
+This prints a comprehensive reference organized by error category:
+- VM syscall error codes (-1 through -8) with causes and fixes
+- CKB node transaction verification errors (-301 through -312)
+- Well-known script error codes from `secp256k1-blake160`, Nervos DAO, and xUDT
+- Best practices for defining your own error code scheme
+
+### Step 4: Find the Bugs in buggy-lock
+
+Open `contracts/buggy-lock/src/main.rs` and study the code. Without looking at the fixed version, try to identify all four bugs.
+
+The bugs are marked with comments that describe the symptoms but you should find the root cause yourself. Use these hints:
+
+| Bug | Category | Where to look |
+|-----|----------|---------------|
+| Bug 1 | Off-by-one | How args are sliced to extract the expected hash |
+| Bug 2 | Wrong index | The argument passed to `load_witness` |
+| Bug 3 | Wrong length | The variable controlling how many bytes are compared |
+| Bug 4 | Missing return | What is returned after the hash comparison fails |
+
+### Step 5: Verify with the Fixed Version
+
+After forming your hypotheses, open `contracts/fixed-lock/src/main.rs`. Each fix is annotated with a detailed comment explaining what was wrong, why it caused the observed symptom, and what the correct code does differently.
+
+### Step 6: Install CKB-Debugger (Optional)
+
+If you have the Rust toolchain installed:
+
+```bash
+cargo install ckb-debugger
+```
+
+To build the buggy-lock and fixed-lock scripts for local testing:
+
+```bash
+cd lessons/09-script-debugging/contracts/buggy-lock
+cargo build --target riscv64imac-unknown-none-elf --release
+```
+
+Then create a mock transaction JSON file and run both the buggy and fixed binaries to observe the different exit codes.
+
+## Summary
+
+Debugging CKB scripts requires purpose-built tools and a methodical mindset because the VM environment provides minimal error information. The key points from this lesson:
+
+**Understanding errors:**
+- Negative exit codes come from CKB-VM (infrastructure problems); positive codes come from your script (logic decisions)
+- Error `-302 TransactionFailedToVerify` is the gateway error — its message tells you which script failed and with what code
+- The exit code is the only diagnostic signal on-chain; make it count by defining distinct codes for every failure mode
+
+**Tools:**
+- CKB-Debugger runs scripts locally against mock transaction JSON files — install it with `cargo install ckb-debugger`
+- The `ckb_debug!` macro writes to stderr under the debugger; it is your only print statement
+- Use `--bin` to point the debugger at a locally compiled binary for fast iteration
+
+**Methodology:**
+1. Read the error — identify the failing script and exit code
+2. Reproduce locally — get the same exit code in CKB-Debugger before changing anything
+3. Add debug prints — trace the execution path with `ckb_debug!` at each decision point
+4. Isolate the bug — find the specific line where actual diverges from expected
+5. Fix and verify — test both success and failure cases after applying the fix
+
+**The four bug categories to watch for:**
+- Off-by-one in data slicing (`args[1..]` instead of `args[0..]`)
+- Wrong index in syscalls (`load_witness(1, ...)` instead of `load_witness(0, ...)`)
+- Truncated comparisons (comparing 20 bytes of a 32-byte hash)
+- Missing error returns (falling through to `0` on an error path)
+
+**Testing discipline:**
+- Always write negative tests — a script that always succeeds is not a lock
+- Test every exit code your script can return with inputs that trigger it
+- Test boundary conditions (minimum sizes, zero lengths, maximum indices)
+- The most dangerous bug is a security bug that passes all happy-path tests
+
+## What's Next
+
+In Lesson 10, you will build a **type script with state management** — a counter that tracks a numeric value and enforces valid state transitions. This introduces type scripts, which run on both input and output cells, and the challenge of encoding and verifying state that changes across transactions. The debugging skills from this lesson apply directly: type script bugs often manifest as unexpected exit codes during state transition validation.
+
+Before moving on, try modifying the buggy-lock script to introduce a fifth bug of your own design, then use CKB-Debugger with `ckb_debug!` output to find and fix it.
