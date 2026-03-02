@@ -1,105 +1,121 @@
 # Learning CKB Fundamentals
 
-A comprehensive 24-lesson incremental learning platform for Nervos CKB blockchain development. Master the Cell Model, write custom scripts, deploy tokens and NFTs, and build real dApps -- all through hands-on, interactive lessons.
+A comprehensive 24-lesson incremental learning platform for Nervos CKB blockchain development. Master the Cell Model, write custom scripts in Rust, deploy tokens and NFTs, and build real dApps — all through hands-on, interactive lessons.
+
+**Live Platform:** [https://website-sooty-chi-72.vercel.app](https://website-sooty-chi-72.vercel.app)
+
+**GitHub:** [https://github.com/RaheemJnr/learning-ckb-fundamentals](https://github.com/RaheemJnr/learning-ckb-fundamentals)
 
 ## Curriculum
 
-The curriculum is organized into six phases, progressing from foundational concepts to mainnet deployment.
+### Phase 1: Foundations (Lessons 1-6)
 
-### Phase 1: Foundation (Lessons 1-3)
-
-| # | Lesson | Description |
+| # | Lesson | Key Concepts |
 |---|--------|-------------|
-| 01 | [Cell Model Explorer](lessons/01-cell-model-explorer/) | Interactive visualization of CKB's Cell Model -- the fundamental data unit |
-| 02 | [Transaction Anatomy](lessons/02-transaction-anatomy/) | Build and inspect CKB transactions step by step |
-| 03 | [Capacity Calculator](lessons/03-capacity-calculator/) | Understand CKByte capacity requirements for cells |
+| 01 | [Cell Model Explorer](lessons/01-cell-model-explorer/) | CKB architecture, Cell structure (capacity/data/lock/type), comparison with account model |
+| 02 | [Transaction Anatomy](lessons/02-transaction-anatomy/) | Transaction structure, inputs/outputs/cell deps, consuming and creating cells |
+| 03 | [Capacity Calculator](lessons/03-capacity-calculator/) | CKBytes, state rent, primary/secondary issuance, Nervos DAO |
+| 04 | [Dev Environment Setup](lessons/04-dev-environment-setup/) | OffCKB, CKB-CLI, CCC SDK installation, devnet bootstrap |
+| 05 | [First Transfer](lessons/05-first-transfer/) | Building a CKB transfer app with CCC SDK |
+| 06 | [Cell Explorer](lessons/06-cell-explorer/) | Cell collection, querying, filtering by lock/type script |
 
-### Phase 2: First Steps (Lessons 4-6)
+### Phase 2: Scripts & Smart Contracts (Lessons 7-12)
 
-| # | Lesson | Description |
+| # | Lesson | Key Concepts |
 |---|--------|-------------|
-| 04 | [Dev Environment Setup](lessons/04-dev-environment-setup/) | Set up your local CKB development environment |
-| 05 | [First Transfer](lessons/05-first-transfer/) | Send your first CKB transfer on devnet |
-| 06 | [Cell Explorer](lessons/06-cell-explorer/) | Browse and inspect live cells on the network |
+| 07 | [Script Basics](lessons/07-script-basics/) | Script execution model, script groups, lock vs type scripts |
+| 08 | [Hash Lock Script](lessons/08-hash-lock-script/) | Hash-lock script in Rust, ckb-script-templates |
+| 09 | [Script Debugging](lessons/09-script-debugging/) | CKB-Debugger, error codes, testing patterns |
+| 10 | [Type Script Counter](lessons/10-type-script-counter/) | State transition validation, counter pattern |
+| 11 | [Molecule Serialization](lessons/11-molecule-serialization/) | Binary serialization, schemas, codegen |
+| 12 | [CKB-VM Deep Dive](lessons/12-ckb-vm-deep-dive/) | RISC-V VM, syscalls, cycle costs, benchmarking |
 
-### Phase 3: Script Programming (Lessons 7-12)
+### Phase 3: Token Standards & Composability (Lessons 13-17)
 
-| # | Lesson | Description |
+| # | Lesson | Key Concepts |
 |---|--------|-------------|
-| 07 | [Script Basics](lessons/07-script-basics/) | Introduction to CKB Script (lock scripts and type scripts) |
-| 08 | [Hash Lock Script](lessons/08-hash-lock-script/) | Write your first lock script using hash verification |
-| 09 | [Script Debugging](lessons/09-script-debugging/) | Debug CKB scripts with the CKB Debugger |
-| 10 | [Type Script Counter](lessons/10-type-script-counter/) | Build a stateful counter using type scripts |
-| 11 | [Molecule Serialization](lessons/11-molecule-serialization/) | Master Molecule, CKB's serialization format |
-| 12 | [CKB-VM Deep Dive](lessons/12-ckb-vm-deep-dive/) | Explore the RISC-V based CKB Virtual Machine |
+| 13 | [xUDT Tokens](lessons/13-xudt-tokens/) | xUDT standard, issuing and transferring fungible tokens |
+| 14 | [Spore NFTs](lessons/14-spore-nfts/) | Spore protocol, on-chain content, clusters, melting |
+| 15 | [Omnilock Wallet](lessons/15-omnilock-wallet/) | Multisig, anyone-can-pay, time locks, cross-chain auth |
+| 16 | [Composability Patterns](lessons/16-composability-patterns/) | First-class assets, script composition, cell deps |
+| 17 | [Cell Management](lessons/17-cell-management/) | Cell strategies, capacity optimization, merging/splitting |
 
-### Phase 4: Ecosystem Standards (Lessons 13-16)
+### Phase 4: Infrastructure (Lessons 18-20)
 
-| # | Lesson | Description |
+| # | Lesson | Key Concepts |
 |---|--------|-------------|
-| 13 | [xUDT Tokens](lessons/13-xudt-tokens/) | Create and manage fungible tokens with xUDT |
-| 14 | [Spore NFTs](lessons/14-spore-nfts/) | Mint and manage NFTs using the Spore protocol |
-| 15 | [Omnilock Wallet](lessons/15-omnilock-wallet/) | Build a multi-auth wallet with Omnilock |
-| 16 | [Composability Patterns](lessons/16-composability-patterns/) | Compose multiple scripts and protocols together |
+| 18 | [RPC Dashboard](lessons/18-rpc-dashboard/) | Full RPC API, chain queries, subscriptions |
+| 19 | [Full Node Setup](lessons/19-full-node-setup/) | Node setup, config, syncing, monitoring |
+| 20 | [Light Client App](lessons/20-light-client-app/) | FlyClient protocol, light client SDK, proofs |
 
-### Phase 5: Infrastructure (Lessons 17-20)
+### Phase 5: Production (Lessons 21-24)
 
-| # | Lesson | Description |
+| # | Lesson | Key Concepts |
 |---|--------|-------------|
-| 17 | [Cell Management](lessons/17-cell-management/) | Advanced cell collection and management strategies |
-| 18 | [RPC Dashboard](lessons/18-rpc-dashboard/) | Build a dashboard using CKB RPC endpoints |
-| 19 | [Full Node Setup](lessons/19-full-node-setup/) | Run and configure a CKB full node |
-| 20 | [Light Client App](lessons/20-light-client-app/) | Build an app using the CKB light client |
-
-### Phase 6: Capstone Projects (Lessons 21-24)
-
-| # | Lesson | Description |
-|---|--------|-------------|
-| 21 | [RGB++ Explorer](lessons/21-rgbpp-explorer/) | Explore the RGB++ protocol for Bitcoin-CKB interop |
-| 22 | [Token DEX](lessons/22-token-dex/) | Build a decentralized exchange for xUDT tokens |
-| 23 | [NFT Marketplace](lessons/23-nft-marketplace/) | Create an NFT marketplace using Spore |
-| 24 | [Mainnet Deployment](lessons/24-mainnet-deployment/) | Deploy your project to CKB mainnet |
+| 21 | [RGB++ Explorer](lessons/21-rgbpp-explorer/) | RGB++ protocol, Bitcoin-CKB isomorphic binding |
+| 22 | [Token DEX](lessons/22-token-dex/) | Orderbook, atomic swaps, composable transactions |
+| 23 | [NFT Marketplace](lessons/23-nft-marketplace/) | Spore + Omnilock + Next.js, wallet connect |
+| 24 | [Mainnet Deployment](lessons/24-mainnet-deployment/) | Testnet deploy, security auditing, production patterns |
 
 ## Tech Stack
 
-- **Website**: Next.js 14 (App Router), TypeScript, Tailwind CSS
-- **Interactive Components**: React, Monaco Editor, custom visualizations
-- **CKB Integration**: @ckb-lumos/lumos, @nervosnetwork/ckb-sdk-core
-- **Smart Contracts**: Rust, CKB Script, Molecule
-- **Testing**: CKB Debugger, devnet
-- **Deployment**: Vercel (website), CKB Testnet/Mainnet (scripts)
+### Learning Platform (Website)
+- **Framework**: Next.js 16 (App Router), TypeScript
+- **Styling**: Tailwind CSS v4 + shadcn/ui
+- **Content**: MDX via `next-mdx-remote/rsc`
+- **Database**: Vercel Postgres + Drizzle ORM
+- **Auth**: CCC SDK wallet connection (CKB wallet address as user ID)
+- **Deployment**: Vercel
+
+### Lesson Projects (Off-chain / dApps)
+- **Language**: TypeScript
+- **SDK**: CCC (`@ckb-ccc/ccc`) — current recommended CKB SDK
+- **Dev Environment**: OffCKB (local devnet)
+
+### Lesson Projects (On-chain Scripts)
+- **Language**: Rust
+- **Templates**: ckb-script-templates (via `cargo generate`)
+- **Debugging**: CKB-Debugger
+- **Target**: RISC-V (CKB-VM)
 
 ## Repository Structure
 
 ```
 learning-ckb-fundamentals/
-├── website/          # Next.js learning platform
-├── lessons/          # 24 standalone lesson projects
+├── website/                 # Next.js learning platform
+│   └── src/
+│       ├── app/             # App Router pages and API routes
+│       ├── components/      # React components
+│       ├── content/         # 24 MDX lesson files + quiz JSONs
+│       └── lib/             # DB, auth, and content utilities
+├── lessons/                 # 24 standalone lesson projects
 │   ├── 01-cell-model-explorer/
 │   ├── 02-transaction-anatomy/
-│   └── ...
+│   └── ... (through 24-mainnet-deployment/)
 └── docs/
-    └── plans/        # Design and implementation docs
+    └── plans/               # Design and implementation docs
 ```
 
 ## Getting Started
 
 ### Prerequisites
 
-- Node.js 18+ and npm/yarn/pnpm
-- Rust toolchain (for script development lessons)
+- Node.js 18+ and npm
+- Rust toolchain (for Lessons 7-12 script development)
 - Git
 
-### Quick Start
+### Run the Website Locally
 
 ```bash
 # Clone the repository
-git clone https://github.com/AjibsBaba/learning-ckb-fundamentals.git
-cd learning-ckb-fundamentals
+git clone https://github.com/RaheemJnr/learning-ckb-fundamentals.git
+cd learning-ckb-fundamentals/website
 
-# Install website dependencies
-cd website
+# Install dependencies
 npm install
+
+# Set up environment variables (copy and fill in Vercel Postgres URL)
+cp .env.example .env.local
 
 # Start the development server
 npm run dev
@@ -107,18 +123,40 @@ npm run dev
 
 Visit [http://localhost:3000](http://localhost:3000) to start learning.
 
-### Working on Individual Lessons
+### Work on a Lesson Project
 
-Each lesson in `lessons/` is a standalone project with its own dependencies and instructions. Navigate to any lesson directory and follow its README for setup.
+Each lesson in `lessons/` is a standalone project. For TypeScript lessons:
 
-## Website
+```bash
+cd lessons/01-cell-model-explorer
+npm install
+npm start
+```
 
-The interactive learning platform is hosted at: *Coming soon*
+For Rust script lessons (07-12):
 
-## Contributing
+```bash
+cd lessons/08-hash-lock-script
+cargo build
+```
 
-Contributions are welcome! Please see individual lesson READMEs for specific contribution guidelines.
+### Environment Variables
+
+To run the website with full functionality (progress tracking, quizzes), set up a Vercel Postgres database and add:
+
+```
+POSTGRES_URL=your_vercel_postgres_url
+```
+
+## Features
+
+- **24 Progressive Lessons** from CKB basics to mainnet deployment
+- **CCC Wallet Auth** — connect your CKB wallet, no email required
+- **Progress Tracking** — resume where you left off
+- **Interactive Quizzes** — 8 questions per lesson with instant feedback
+- **Real-World Examples** — learn from projects like .bit, Spore, Stable++, RGB++
+- **Dual Language** — TypeScript/CCC for dApps, Rust for on-chain scripts
 
 ## License
 
-This project is open source. See individual components for specific licenses.
+MIT
