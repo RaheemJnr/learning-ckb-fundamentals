@@ -1,0 +1,492 @@
+# Fungible Tokens with xUDT
+
+## Overview
+
+In this lesson, you will learn how to create and manage **fungible tokens** on CKB using the **xUDT** (eXtensible User Defined Token) standard. xUDT is CKB's primary token protocol, analogous to ERC-20 on Ethereum but built on a fundamentally different architecture — one where tokens are first-class citizens of the ledger rather than entries in a contract's storage.
+
+By the end of this lesson, you will be able to:
+
+- Explain what xUDT is and how it evolved from sUDT
+- Describe the xUDT cell structure and what each field contains
+- Understand how tokens are uniquely identified by their type script
+- Issue a new token by building and signing a genesis transaction
+- Transfer tokens by consuming and recreating token cells
+- Query token balances by scanning the live cell set
+- Explain xUDT extension scripts and their use cases
+- Compare the first-class asset model to ERC-20's contract storage model
+
+## Prerequisites
+
+- Completion of Lessons 1-10 (Cell Model, Transactions, Scripts, Lock Scripts, Type Scripts)
+- Node.js 18+ installed
+- Familiarity with TypeScript (the CCC SDK is TypeScript-first)
+- Basic understanding of big-endian vs little-endian byte order
+
+## Concepts
+
+### What is xUDT?
+
+**xUDT** stands for **eXtensible User Defined Token**. It is the second generation of CKB's fungible token standard, defined in [RFC-0052](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0052-extensible-udt/0052-extensible-udt.md).
+
+CKB's token history has two chapters:
+
+**sUDT (Simple UDT, RFC-0025)** — released 2020. The first CKB token standard. Stores amounts as uint128 LE in cell data. Widely adopted. Simple but inflexible — no mechanism for custom validation logic.
+
+**xUDT (eXtensible UDT, RFC-0052)** — released 2023. A superset of sUDT that adds an "extension script" mechanism and an "owner mode" for privileged operations. Backwards compatible with sUDT when flags are set to 0x00.
+
+The key insight behind both standards is that token amounts are stored **in the token holder's own cells**, not in a central contract. This is what makes CKB tokens "first-class assets".
+
+### sUDT vs xUDT: The Evolution
+
+| Feature | sUDT (RFC-0025) | xUDT (RFC-0052) |
+|---------|-----------------|-----------------|
+| Amount format | uint128 LE (16 bytes) | uint128 LE (16 bytes) — identical |
+| Type script args | owner lock hash (32 bytes) | lock hash + flags + optional ext args |
+| Extension scripts | Not supported | Supported via flags byte |
+| Owner mode | No | Yes — issuer can bypass conservation |
+| Backwards compat | N/A | flags=0x00 behaves identically to sUDT |
+| Adoption | All early CKB tokens | New tokens, DeFi protocols, RGB++ |
+
+The conservation rule is the same in both standards:
+
+```
+sum(input token amounts) == sum(output token amounts)
+```
+
+This rule is enforced by the on-chain type script. Any transaction that violates it is rejected by CKB nodes before it can be included in a block.
+
+### xUDT Cell Structure
+
+Every xUDT token cell has exactly four fields:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  xUDT Token Cell                                            │
+│                                                             │
+│  capacity:  uint64 (8 bytes) — CKByte storage deposit       │
+│  data:      uint128 LE (≥16 bytes) — token amount           │
+│  lock:      Script — who owns this cell (can spend it)      │
+│  type:      Script — xUDT type script (token identity)      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**capacity**: The amount of CKBytes locked as storage deposit. This is NOT the token value — it is the fee you pay to store the cell on CKB's blockchain. When you consume the cell (e.g., to transfer tokens), you get this CKByte deposit back. A typical xUDT cell requires 142–200 CKBytes.
+
+**data**: The first 16 bytes encode the token amount as a **little-endian uint128**. This is the actual token value. The data field may be longer than 16 bytes if extension scripts store additional metadata after the amount.
+
+**lock**: The owner's lock script. This is how ownership is expressed on CKB — the owner is whoever can produce a valid witness that satisfies this script. To transfer tokens, you must satisfy the current lock script and create a new cell with the recipient's lock script.
+
+**type**: The xUDT type script. This is what makes a cell a "token cell" — plain CKB cells have no type script. The complete type script `{codeHash, hashType, args}` is the token's unique identity.
+
+### Amount Encoding: uint128 Little-Endian
+
+xUDT stores amounts as **unsigned 128-bit integers in little-endian byte order**. Little-endian means the byte at the lowest address holds the least significant bits.
+
+```
+Amount: 1000 (decimal) = 0x3E8 (hex)
+
+Big-endian (NOT used):    00 00 00 00 00 00 00 00 00 00 00 00 00 00 03 E8
+Little-endian (xUDT):     E8 03 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+```
+
+Why little-endian? CKB-VM runs on RISC-V, which is a little-endian architecture. Storing amounts in little-endian allows on-chain scripts to read and write amounts efficiently without byte-swapping.
+
+The uint128 type supports amounts up to approximately 3.4 × 10^38, which is more than sufficient for any token supply with any number of decimal places.
+
+### Token Identity
+
+Token identity in xUDT is determined by the **complete type script**:
+
+```
+Token Identity = { codeHash, hashType, args }
+```
+
+All three fields must match exactly for two cells to carry the same token. The `args` field encodes:
+
+```
+bytes  0-31:  owner lock script hash (blake2b of serialized lock script)
+byte   32:    flags byte
+                0x00 = no extension (same behavior as sUDT)
+                0x01 = extension referenced by type hash
+                0x02 = extension referenced by data hash
+bytes  33+:   optional extension script args (if flags != 0x00)
+```
+
+The **owner lock script hash** is the core of token identity. When you issue a token, CKB computes the blake2b hash of your lock script and embeds it in the type script args. Because your lock script is unique to you (it contains your public key), your token's type script args are globally unique. Nobody else can create a token with the same identity without forging your lock script hash.
+
+This is analogous to ERC-20 contract addresses being unique by deployment order — but xUDT uniqueness is cryptographic rather than sequential.
+
+### Issuing Tokens
+
+Issuing tokens means creating the first cells that carry a new token type. This is called the **genesis** of the token.
+
+The issuance process:
+
+1. Decide on your lock script (your address's lock) — this becomes the token issuer
+2. Compute `blake2b(serialized_lock_script)` — this is the token identifier embedded in type args
+3. Build the xUDT type script: `{xUDT_code_hash, "data1", lock_hash + "00"}`
+4. Create output cells with:
+   - enough capacity (≥142 CKBytes)
+   - data = encoded initial supply (uint128 LE)
+   - lock = recipient's lock script (may be your own)
+   - type = the xUDT type script you just built
+
+The xUDT on-chain script enters **owner mode** when processing a transaction where:
+- There are NO input cells with this token's type script
+- OR the transaction satisfies the issuer's lock script
+
+In owner mode, the conservation rule is bypassed. The script instead checks that the issuer's lock is satisfied. This allows the issuer to mint any amount of tokens at any time.
+
+Example issuance transaction:
+
+```
+INPUTS:                              OUTPUTS:
+┌─────────────────────┐              ┌────────────────────────────────┐
+│ Alice's CKB cell    │ ──────────►  │ Token genesis cell             │
+│   capacity: 500 CKB │              │   capacity: 200 CKB            │
+│   data:     (empty) │              │   data: 1,000,000,000,000,000  │
+│   lock:     alice   │              │         (10,000,000 tokens,    │
+│   type:     none    │              │          8 decimals)           │
+└─────────────────────┘              │   lock:     alice              │
+                                     │   type:     TOKEN_A (xUDT)     │
+                                     ├────────────────────────────────┤
+                                     │ Alice's CKB change             │
+                                     │   capacity: ~299.99 CKB        │
+                                     │   lock:     alice              │
+                                     │   type:     none               │
+                                     └────────────────────────────────┘
+```
+
+### Token Arithmetic: How Amounts Are Conserved
+
+The xUDT type script performs a simple arithmetic check during transfers:
+
+```
+For all cells in the type script group:
+  inputs_sum  = sum(decode_u128_le(cell.data[0:16]) for cell in group_inputs)
+  outputs_sum = sum(decode_u128_le(cell.data[0:16]) for cell in group_outputs)
+  assert inputs_sum == outputs_sum
+```
+
+A **script group** is all cells in the transaction that share the exact same type script (same `codeHash + hashType + args`). The script runs once for the group and sees all cells together.
+
+This means you can consolidate multiple token cells into one, or split one cell into many, as long as the total amount is preserved:
+
+```
+Consolidate: [500 tokens] + [300 tokens] → [800 tokens]   ✓ (800 == 800)
+Split:       [1000 tokens] → [400 tokens] + [600 tokens]  ✓ (1000 == 1000)
+Transfer:    [1000 tokens] → [300 tokens] + [700 tokens]  ✓ (1000 == 1000)
+Inflate:     [1000 tokens] → [1001 tokens]                ✗ (1000 != 1001, rejected)
+```
+
+### Transferring Tokens
+
+Transferring xUDT tokens is a UTXO-style operation: you consume input token cells and create output token cells with the recipient's lock. The type script ensures the total amount is conserved.
+
+Transfer example (Alice sends 3 tokens to Bob, keeps 7 as change):
+
+```
+INPUTS:                              OUTPUTS:
+┌─────────────────────┐              ┌────────────────────────────────┐
+│ Alice's token cell  │ ──────────►  │ Bob's new token cell           │
+│   capacity: 200 CKB │              │   capacity: 200 CKB            │
+│   data: 10 tokens   │              │   data: 3 tokens               │
+│   lock: alice       │              │   lock: bob                    │
+│   type: TOKEN_A     │              │   type: TOKEN_A (same!)        │
+├─────────────────────┤              ├────────────────────────────────┤
+│ Alice's fee cell    │ ──────────►  │ Alice's token change           │
+│   capacity: 100 CKB │              │   capacity: 200 CKB            │
+└─────────────────────┘              │   data: 7 tokens               │
+                                     │   lock: alice                  │
+                                     │   type: TOKEN_A (same!)        │
+                                     ├────────────────────────────────┤
+                                     │ Alice's CKB change             │
+                                     │   capacity: ~99.99 CKB         │
+                                     │   lock: alice                  │
+                                     │   type: none                   │
+                                     └────────────────────────────────┘
+
+xUDT validates:
+  Group inputs:  [10 tokens]
+  Group outputs: [3 tokens] + [7 tokens] = [10 tokens]
+  Check:         10 == 10 ✓
+```
+
+Critical rules for valid transfers:
+
+1. Input and output token cells must have **identical type scripts** (same token)
+2. `sum(input amounts) == sum(output amounts)` — enforced by xUDT on-chain
+3. The sender's lock script must be satisfied (their signature in witnesses)
+4. Each output cell must have enough capacity to store its data
+
+### xUDT Extension Scripts
+
+The "eXtensible" part of xUDT is the **extension script mechanism**. Extension scripts are additional on-chain programs that run alongside the base xUDT conservation check.
+
+**No extension (flags=0x00):**
+```
+xUDT verifies: sum(inputs) == sum(outputs)
+Result: Pure conservation, any amount can be minted by owner, no transfer restrictions
+```
+
+**With extension (flags=0x01 or 0x02):**
+```
+xUDT verifies: sum(inputs) == sum(outputs)
+             AND extension_script() returns 0 (success)
+Result: Both conservation AND custom rules must pass
+```
+
+Extension script examples:
+
+| Extension | What it enforces |
+|-----------|-----------------|
+| MaxSupply | Total minted tokens can never exceed a hard cap |
+| Whitelist | All recipient lock hashes must be in an approved list |
+| Vesting | Token cells cannot be spent until a specific block height |
+| MultiSig | Minting requires M-of-N signatures from a governance committee |
+| Regulatory | Specific lock hashes can be frozen by a compliance authority |
+
+**Owner mode and extensions:** If the token issuer's lock script is satisfied in the transaction, extension scripts are **skipped**. This allows the issuer to mint tokens, upgrade extension scripts, and perform emergency operations. It also means users must trust the issuer not to misuse this power.
+
+Extension script args layout (flags=0x01):
+```
+xUDT type args: [lock_hash (32B)] [0x01 (1B)] [ext_script_type_hash (32B)]
+```
+
+The extension script is identified by its type hash. When the xUDT script detects flags=0x01, it looks for a live cell whose type script hash matches the stored ext_script_type_hash, loads its code, and executes it.
+
+### First-Class Assets: Tokens as UTXOs
+
+The most important architectural distinction of xUDT is that tokens are **first-class assets** — they live directly in the user's cell set alongside native CKBytes.
+
+**ERC-20 model (Ethereum):**
+
+```
+TokenContract (address: 0xABC...)
+  storage {
+    balances: {
+      Alice: 1000,
+      Bob:   500,
+      Carol: 250
+    }
+    totalSupply: 1750
+    owner: deployer
+  }
+```
+
+Alice's tokens do not exist in Alice's wallet. They exist as a number in the contract's storage. The contract is the custodian of everyone's balances. Alice must call `contract.transfer(Bob, 100)` and pay gas for the contract to update its mapping.
+
+**xUDT model (CKB):**
+
+```
+Alice's cells:          Bob's cells:          Carol's cells:
+┌──────────────┐        ┌──────────────┐       ┌──────────────┐
+│ TOKEN_A cell │        │ TOKEN_A cell │       │ TOKEN_A cell │
+│  data: 1000  │        │  data:  500  │       │  data:  250  │
+│  lock: alice │        │  lock:  bob  │       │  lock: carol │
+│  type: TOKEN_A│       │  type: TOKEN_A│      │  type: TOKEN_A│
+└──────────────┘        └──────────────┘       └──────────────┘
+```
+
+Alice's tokens live **in Alice's own cells**, controlled by Alice's own lock script. To transfer tokens, Alice does not call a contract. She builds a transaction that consumes her cell and creates a new cell with Bob's lock. No contract mediates the transfer.
+
+### Comparison: xUDT vs ERC-20
+
+| Aspect | xUDT (CKB) | ERC-20 (Ethereum) |
+|--------|------------|-------------------|
+| **Balance storage** | User's own UTXO cells | Contract storage mapping |
+| **Transfer mechanism** | Consume + create cells | Contract function call |
+| **Token freezing** | Impossible without owner's key | Contract can blacklist |
+| **Contract bug risk** | Each user's cells are isolated | All balances in shared storage |
+| **Reentrancy** | Not applicable | Critical vulnerability class |
+| **Parallelism** | Cells accessed in parallel | Sequential state writes |
+| **Privacy** | Multiple cells aggregated | Single mapping lookup |
+| **Balance query** | Scan UTXO set by type script | Single `balanceOf()` call |
+| **Wallet complexity** | Must collect/merge cells | Simple balance read |
+| **Custom logic** | Extension scripts (add-on) | Built into contract |
+| **Supply cap enforcement** | Extension script required | `require(total <= MAX)` |
+| **Approval model** | Not needed (UTXO ownership) | `approve` + `transferFrom` |
+| **Decimals** | Off-chain convention (no on-chain field) | `decimals()` function |
+| **Gas/fee model** | CKByte capacity (storage) | Gas per computation |
+
+### Querying Token Balances
+
+Because token amounts are distributed across many cells (each transfer may leave change cells, receive cells, etc.), querying a balance requires scanning the live cell set.
+
+The query parameters:
+
+1. **Lock script filter**: which owner's cells to look for
+2. **Type script filter**: which token to look for
+
+Both filters must match for a cell to be included. The balance is the sum of all matching cells' uint128 LE amounts.
+
+```typescript
+// CCC SDK balance query pattern
+async function getTokenBalance(
+  client: ccc.Client,
+  ownerAddress: string,
+  tokenTypeScript: ccc.Script
+): Promise<bigint> {
+  const ownerLock = (await ccc.Address.fromString(ownerAddress, client)).script;
+  let total = 0n;
+
+  for await (const cell of client.findCells({
+    script: ownerLock,
+    scriptType: "lock",
+    filter: {
+      script: tokenTypeScript,
+      scriptType: "type",
+    },
+  })) {
+    // Decode uint128 LE from first 16 bytes of cell data
+    if (cell.outputData && cell.outputData.length >= 34) {
+      const amountBytes = ccc.bytesFrom(cell.outputData).slice(0, 16);
+      total += ccc.numLeFromBytes(amountBytes);
+    }
+  }
+
+  return total;
+}
+```
+
+This query is handled efficiently by CKB's built-in cell indexer, which maintains secondary indexes on lock script hash and type script hash.
+
+## Step-by-Step Tutorial
+
+### Step 1: Set Up the Project
+
+```bash
+cd lessons/13-xudt-tokens
+npm install
+```
+
+Inspect `package.json` — the only runtime dependency is `@ckb-ccc/core`.
+
+### Step 2: Run the Demo
+
+```bash
+npm start
+```
+
+The demo runs through all xUDT concepts without requiring a testnet connection. Observe:
+
+- How token identity is constructed from lock script hash + flags
+- How amounts are encoded/decoded as uint128 LE
+- The issuance transaction structure
+- The transfer transaction structure with conservation verification
+
+### Step 3: Examine the Helper Library
+
+Open `src/xudt-helpers.ts`. Key functions to study:
+
+**`encodeAmount(amount: bigint): string`** — Converts a BigInt to 16-byte LE hex. This is what goes in the cell data field.
+
+**`decodeAmount(hex: string): bigint`** — Reads the first 16 bytes of cell data as LE uint128. This is how wallets and scripts read balances.
+
+**`buildXudtTypeScript(lockHash, flags)`** — Constructs the complete xUDT type script object. The `codeHash` here is the deployed xUDT binary hash on testnet.
+
+**`verifyTransferBalance(inputs, outputs)`** — Off-chain conservation check. Use this before broadcasting to catch errors early.
+
+### Step 4: Understanding the Type Script Args
+
+Open `src/xudt-helpers.ts` and find `buildXudtTypeArgs`. Study the byte layout:
+
+```typescript
+// bytes 0-31: lock hash (32 bytes)
+// byte 32:    flags (1 byte)
+// bytes 33+:  extension args (optional)
+const args = lockHash + flagsByte + extensionArgs;
+```
+
+Experiment: change the flags byte and see how the resulting type script args differ. Notice that even a one-byte change in args creates a completely different token identity.
+
+### Step 5: Issue a Token on Testnet (Optional)
+
+To issue a real token on CKB Pudge testnet:
+
+1. Get testnet CKB:
+   ```
+   https://faucet.nervos.org
+   ```
+
+2. Set your environment:
+   ```bash
+   export TESTNET_PRIVATE_KEY=0x<64_hex_chars>
+   ```
+
+3. Adapt the Section 9 code patterns in `src/index.ts` to build and sign a real issuance transaction using the CCC SDK.
+
+4. Verify your token on the explorer:
+   ```
+   https://pudge.explorer.nervos.org
+   ```
+   Search for your transaction hash or your address to see the new token cell.
+
+### Step 6: Transfer Tokens
+
+After issuing tokens, adapt the transfer pattern from Section 5:
+
+```typescript
+// Collect your token cells
+const tokenCells = [];
+for await (const cell of client.findCells({ ... })) {
+  tokenCells.push(cell);
+}
+
+// Build transfer transaction
+// Consume input cells → create output cells with recipient's lock
+// Conservation: sum(inputs) == sum(outputs)
+```
+
+### Step 7: Query the Balance
+
+After transferring, query both sender and recipient balances using the `getTokenBalance` pattern from Section 6. Verify that:
+- Sender balance decreased by the transfer amount
+- Recipient balance increased by the transfer amount
+- Total supply across all holders is unchanged
+
+## Real-World Examples
+
+### Stable++ (RUSD)
+
+[Stable++](https://stable.pp.finance) is a CKB-native stablecoin protocol that issues RUSD (an xUDT token) backed by CKB collateral. Users deposit CKB to mint RUSD at a collateralization ratio, and can burn RUSD to reclaim their CKB.
+
+RUSD demonstrates xUDT's extension script capability — the minting extension script checks the current CKB price oracle and ensures the collateral ratio remains above the minimum threshold before allowing new RUSD to be minted.
+
+### RGB++ Bridged Assets
+
+The [RGB++ protocol](https://github.com/ckb-cell/RGBPlusPlus-design) allows Bitcoin-native assets to be represented on CKB as xUDT tokens. Each xUDT cell is cryptographically bound to a Bitcoin UTXO, creating a trustless bridge between Bitcoin and CKB's programmable layer.
+
+When a user transfers an RGB++ asset on Bitcoin, the corresponding xUDT cells on CKB are automatically updated in a shadow transaction. This creates a seamless experience where the same asset exists simultaneously on Bitcoin's security model and CKB's programmability.
+
+### CKB DeFi Ecosystem
+
+Multiple DeFi protocols on CKB issue governance and utility tokens as xUDT:
+
+- **UTXO Stack**: Governance token for the modular blockchain framework
+- **Nervape**: Composable digital collectibles with fungible companion tokens
+- Various DEX and liquidity protocols issuing LP tokens as xUDT
+
+## Summary
+
+xUDT is CKB's extensible fungible token standard. Its design reflects CKB's core philosophy: tokens are data stored in cells, owned directly by users, with type scripts enforcing the rules of valid state transitions.
+
+**Key takeaways:**
+
+1. **Cell structure**: Token cells have capacity (storage deposit), data (uint128 LE amount), lock (owner), and type (xUDT identity script).
+
+2. **Token identity**: Determined by the complete type script `{codeHash, hashType, args}`. The args embed the issuer's lock hash, making each token globally unique.
+
+3. **Amount encoding**: uint128 little-endian in the first 16 bytes of cell data. Supports amounts up to 3.4 × 10^38.
+
+4. **Conservation rule**: `sum(input amounts) == sum(output amounts)`. Enforced by the xUDT type script. Violations cause transaction rejection.
+
+5. **Owner mode**: When the issuer's lock is satisfied, the conservation rule is bypassed to allow minting. No protocol-level supply cap by default.
+
+6. **Extension scripts**: Optional add-on validation logic referenced by the flags byte in type args. Enables supply caps, whitelists, vesting, governance, and regulatory compliance.
+
+7. **First-class assets**: Token cells live directly in users' UTXO sets. No central contract mediates transfers. Users own their tokens at the protocol level.
+
+8. **xUDT vs ERC-20**: xUDT provides stronger ownership guarantees (no freeze risk, no shared storage bugs) at the cost of more complex balance queries and wallet implementations.
+
+In the next lesson, you will explore **Spore Protocol** — CKB's standard for non-fungible tokens, which applies the same first-class asset principles to unique digital objects.

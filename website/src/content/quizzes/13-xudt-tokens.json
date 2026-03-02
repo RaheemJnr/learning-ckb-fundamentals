@@ -1,0 +1,101 @@
+{
+  "lessonId": 13,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What does xUDT stand for, and what was the primary limitation of its predecessor that motivated its creation?",
+      "options": [
+        "eXtended User Defined Token; its predecessor sUDT did not support uint128 amounts and was limited to uint64",
+        "eXtensible User Defined Token; its predecessor sUDT had no mechanism for custom validation logic beyond the basic conservation rule",
+        "eXclusive User Defined Token; its predecessor sUDT required tokens to be stored in smart contracts rather than user cells",
+        "eXchangeable User Defined Token; its predecessor sUDT could only be used on CKB mainnet and not on testnet"
+      ],
+      "correctAnswer": 1,
+      "explanation": "xUDT stands for eXtensible User Defined Token (RFC-0052). Its predecessor sUDT (Simple UDT, RFC-0025) enforced only the basic conservation rule (sum of inputs equals sum of outputs) with no way to attach custom validation logic. xUDT adds extension scripts that run alongside conservation, enabling supply caps, whitelists, vesting schedules, and other custom rules. Both standards use uint128 LE for amounts."
+    },
+    {
+      "id": 2,
+      "question": "What is stored in the first 16 bytes of an xUDT token cell's data field, and in what byte order?",
+      "options": [
+        "The token type identifier as a blake2b hash, stored in big-endian byte order",
+        "The cell's capacity in Shannon units, stored in little-endian byte order",
+        "The token amount as an unsigned 128-bit integer, stored in little-endian byte order",
+        "The owner's public key hash, stored in big-endian byte order"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The first 16 bytes of an xUDT cell's data field store the token amount as a uint128 (unsigned 128-bit integer) in little-endian byte order. Little-endian means the least significant byte comes first. For example, amount 1000 (0x3E8) is stored as E8 03 00 00 00 00 00 00 00 00 00 00 00 00 00 00. This format is identical to sUDT, ensuring backward compatibility. The data field may contain additional bytes after the 16-byte amount if extension scripts need to store metadata."
+    },
+    {
+      "id": 3,
+      "question": "How is a specific xUDT token uniquely identified on the CKB blockchain?",
+      "options": [
+        "By the transaction hash of the genesis (first minting) transaction",
+        "By the issuer's address string, which is stored in the type script args",
+        "By the complete type script: the combination of codeHash, hashType, and args (which includes the issuer's lock hash)",
+        "By a sequential token ID assigned by the CKB protocol when the first token cell is created"
+      ],
+      "correctAnswer": 2,
+      "explanation": "A specific xUDT token is identified by its complete type script: {codeHash, hashType, args}. All three fields must match for two cells to carry the same token. The args field encodes the owner's lock script hash (bytes 0-31) plus a flags byte (byte 32). The lock script hash makes the token globally unique — even if two issuers deploy the same xUDT binary, their tokens are different because their lock script hashes differ. Changing any field in the type script creates a completely different token."
+    },
+    {
+      "id": 4,
+      "question": "What is 'owner mode' in xUDT, and when does the type script enter this mode?",
+      "options": [
+        "A special read-only mode where the token owner can inspect cell data without consuming cells",
+        "A mode where the conservation rule is bypassed and arbitrary amounts can be minted, triggered when the issuer's lock script is satisfied in the transaction",
+        "A mode that locks all token cells to prevent transfers, activated by sending a special transaction to the xUDT contract",
+        "A governance mode where token holders can vote on parameter changes, activated when a majority of token cells are included as inputs"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Owner mode in xUDT is a special execution path where the conservation rule (sum inputs == sum outputs) is bypassed, allowing the issuer to mint any amount of tokens. The type script enters owner mode when the transaction satisfies the issuer's lock script — meaning the issuer's signature (or equivalent proof) is present in the witnesses. In owner mode, extension scripts are also skipped. This gives the issuer permanent minting authority and the ability to perform emergency operations. It also means users must trust the issuer not to inflate the supply unless a supply-cap extension script is deployed."
+    },
+    {
+      "id": 5,
+      "question": "What is the xUDT conservation rule, and what happens to a transaction that violates it?",
+      "options": [
+        "The rule states that token cells must always have at least 142 CKBytes of capacity; violations cause tokens to be auto-burned",
+        "The rule states that sum(input token amounts) must equal sum(output token amounts) for the same token type; violations cause the transaction to be rejected by CKB nodes",
+        "The rule states that a token transfer cannot split a cell into more than 2 output cells; violations cause the excess cells to be discarded",
+        "The rule states that token amounts cannot decrease (burns are not allowed); violations cause the transaction to be reverted"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The xUDT conservation rule states that the sum of token amounts in all input cells with a given type script must equal the sum of token amounts in all output cells with the same type script. The xUDT type script computes both sums and asserts they are equal. If they differ, the script returns a non-zero exit code, which causes the CKB transaction validation to fail. The transaction is then rejected by CKB nodes and never included in a block. Burns are allowed (you can send tokens to an unspendable lock), and the issuer can bypass conservation via owner mode."
+    },
+    {
+      "id": 6,
+      "question": "What is the flags byte in xUDT type script args, and what does flags=0x00 mean?",
+      "options": [
+        "The flags byte is byte 0 of the type script args and stores the token's decimal precision; 0x00 means the token has no decimals",
+        "The flags byte is byte 32 of the type script args and controls the extension script mechanism; 0x00 means no extension scripts (pure conservation, identical behavior to sUDT)",
+        "The flags byte is byte 31 of the type script args and indicates the xUDT version; 0x00 means version 0, which is deprecated",
+        "The flags byte is the last byte of the type script args and controls owner mode; 0x00 means owner mode is permanently disabled"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The flags byte is byte 32 (the 33rd byte, after the 32-byte lock hash) of the xUDT type script args. It controls the extension script mechanism: 0x00 means no extension scripts are attached, so the type script only enforces the basic conservation rule — this is identical to sUDT behavior. 0x01 means an extension script is referenced by type hash (bytes 33-64 of args). 0x02 means an extension script is referenced by data hash. Using flags=0x00 ensures full backwards compatibility with sUDT tooling."
+    },
+    {
+      "id": 7,
+      "question": "How does querying an xUDT token balance fundamentally differ from calling ERC-20's balanceOf() function?",
+      "options": [
+        "xUDT balances are queried faster because CKB stores balances in a dedicated balance trie, while ERC-20 requires iterating through all events",
+        "xUDT balance queries require scanning the live UTXO set for all cells matching both the owner's lock script and the token's type script, then summing their amounts — there is no single storage slot to read",
+        "xUDT and ERC-20 balance queries are functionally identical; both return a single uint256 from a mapping",
+        "xUDT balances can only be queried by the token issuer because the data is encrypted with the issuer's key"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Unlike ERC-20 where balanceOf(address) reads a single value from the contract's storage mapping, an xUDT balance is distributed across potentially many cells in the UTXO set. To compute a balance, you must query the cell indexer for all live cells that match BOTH the owner's lock script AND the token's type script, then decode the uint128 LE amount from the first 16 bytes of each cell's data field, and sum all those amounts. This is more complex than a single storage slot read, but it enables each user to own their tokens directly without a custodian contract."
+    },
+    {
+      "id": 8,
+      "question": "What is the key difference between xUDT's 'first-class asset' model and ERC-20's contract storage model in terms of token ownership security?",
+      "options": [
+        "xUDT tokens are more secure because they use stronger cryptography (SHA-3) compared to ERC-20 (SHA-256)",
+        "ERC-20 tokens are more secure because the contract enforces strict access controls that xUDT lacks",
+        "In xUDT, tokens live directly in the owner's cells controlled by their lock script — no central contract can freeze or confiscate tokens; in ERC-20, the contract owns the ledger and can implement blacklists or pause functions that freeze user funds",
+        "xUDT tokens are more secure because they are stored on Bitcoin's blockchain while ERC-20 tokens are on the less secure Ethereum chain"
+      ],
+      "correctAnswer": 2,
+      "explanation": "In xUDT's first-class asset model, each user's token amount is stored in cells that they directly control via their lock script. No external party can spend those cells without satisfying the lock script (e.g., forging the owner's signature). This means there is no central contract that can be used to freeze, confiscate, or rug users' token holdings. In ERC-20, all balances exist in a single contract's storage, and the contract owner can implement admin functions (blacklist, pause, transferFrom with unlimited approval) that give them control over user funds. The xUDT model provides stronger ownership guarantees at the cost of more complex wallet implementations and balance queries."
+    }
+  ]
+}

@@ -1,0 +1,101 @@
+{
+  "lessonId": 15,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What is the purpose of the first byte (byte 0) in Omnilock's args field?",
+      "options": [
+        "It stores the version number of the Omnilock binary",
+        "It is a flag byte that selects the authentication mode (e.g., CKB, Ethereum, multisig)",
+        "It encodes the minimum payment amount for ACP mode",
+        "It stores the network identifier (mainnet vs testnet)"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Omnilock's args[0] is the auth flag byte that selects which authentication mode to use. A value of 0x00 selects secp256k1-blake160 (CKB-native), 0x01 selects Ethereum, 0x06 selects M-of-N multisig, and so on. This single byte allows one deployed script to support many wallet ecosystems."
+    },
+    {
+      "id": 2,
+      "question": "In Omnilock Mode 0x01 (Ethereum auth), what exactly is stored in args[1..20] (the auth content)?",
+      "options": [
+        "The 33-byte compressed secp256k1 public key, truncated to 20 bytes",
+        "The Ethereum address — which equals keccak160(uncompressed_pubkey), i.e., last 20 bytes of keccak256(pubkey)",
+        "The blake160 hash of the Ethereum address",
+        "The ABI-encoded function selector for personal_sign"
+      ],
+      "correctAnswer": 1,
+      "explanation": "In Mode 0x01, the auth content is the standard Ethereum address format: the last 20 bytes of keccak256 applied to the uncompressed public key (without the 0x04 prefix). This is the same address displayed in MetaMask. So for Ethereum users, their existing ETH address directly becomes the auth content for their CKB Omnilock cells."
+    },
+    {
+      "id": 3,
+      "question": "What is the Anyone-Can-Pay (ACP) feature in Omnilock, and which bit enables it?",
+      "options": [
+        "ACP allows any script to spend the cell freely; enabled by setting args[0] to 0xFF",
+        "ACP allows anyone to add CKB or tokens to the cell without the owner's signature; enabled by bit 0 of args[21] (omnilockFlags)",
+        "ACP disables signature verification entirely; enabled by setting threshold to 0 in multisig mode",
+        "ACP is a fee-payment mechanism; enabled by bit 7 of the hash_type field"
+      ],
+      "correctAnswer": 1,
+      "explanation": "ACP (Anyone-Can-Pay) lets anyone send CKB or UDT tokens to a cell without requiring the owner to sign the receiving transaction. It is enabled by setting bit 0 of args[21] (the omnilockFlags byte) to 1. The constraint is that the output must have the same lock as the input and must contain at least as much value. This is ideal for payment addresses, donation cells, and service accounts."
+    },
+    {
+      "id": 4,
+      "question": "In Omnilock Mode 0x06 (M-of-N multisig), what is stored in the auth content (args[1..20])?",
+      "options": [
+        "The threshold value M encoded as a 20-byte big-endian integer",
+        "The first signer's pubkey hash (the others overflow into args[21+])",
+        "blake160 of the serialized multisig script bytes (which includes M, N, and all pubkey hashes)",
+        "The concatenated signatures of all required signers"
+      ],
+      "correctAnswer": 2,
+      "explanation": "For multisig mode, args[1..20] contains blake160(multisig_script_bytes) — a 20-byte commitment to the entire multisig configuration. The full multisig script (reserved byte, require_first_n, threshold M, pubkeys_count N, and N × 20-byte pubkey hashes) is provided in the transaction witness. Omnilock hashes the witness-provided script and checks it against the args commitment. This keeps args compact while supporting any M-of-N configuration."
+    },
+    {
+      "id": 5,
+      "question": "How does the ACP minimum payment amount work in Omnilock?",
+      "options": [
+        "The minimum is stored as a raw CKB value in 8 bytes after the omnilockFlags byte",
+        "The minimum is stored as an exponent: args[22] for CKB, args[23] for UDT, where minimum = 10^exponent (shannon or token unit)",
+        "There is no minimum; ACP always accepts any positive amount",
+        "The minimum is configured globally in the Omnilock binary and cannot be customized per cell"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Omnilock stores the minimum ACP payment as an exponent rather than a raw value. args[22] is the CKB minimum exponent (minimum CKB increment = 10^exponent shannon), and args[23] is the UDT minimum exponent. Using exponents saves space (1 byte encodes a wide range of values) and efficiently prevents dust attacks. An exponent of 0 means no minimum, while 8 means at least 1 CKB (10^8 shannon)."
+    },
+    {
+      "id": 6,
+      "question": "Why does JoyID wallet use Omnilock instead of building its own lock script?",
+      "options": [
+        "JoyID is required by Nervos Foundation to use Omnilock for all mainnet deployments",
+        "JoyID uses Omnilock because it needs the ACP feature for its payment flow",
+        "Omnilock's extensible design allows JoyID to add a WebAuthn/P-256 auth mode without redeploying core lock infrastructure, while benefiting from Omnilock's existing security audits",
+        "JoyID uses Omnilock only for multisig wallets; single-key JoyID wallets use a custom script"
+      ],
+      "correctAnswer": 2,
+      "explanation": "JoyID builds on Omnilock because Omnilock provides a battle-tested auth framework. JoyID implements P-256 (secp256r1) signature verification — the curve used by WebAuthn/passkeys — as an Omnilock extension. This lets users authenticate with Face ID or Touch ID. By extending Omnilock rather than deploying a new lock from scratch, JoyID inherits Omnilock's security properties and integrations with the CKB ecosystem."
+    },
+    {
+      "id": 7,
+      "question": "What does setting args[21] to 0x03 mean in an Omnilock cell?",
+      "options": [
+        "The cell uses Mode 0x03 (Tron) authentication",
+        "Both bit 0 (ACP) and bit 1 (time-lock) are enabled simultaneously",
+        "The cell requires 3 signatures for any operation",
+        "The lock is permanently disabled and the cell is burned"
+      ],
+      "correctAnswer": 1,
+      "explanation": "args[21] is the omnilockFlags bitmask. Bit 0 (value 0x01) enables ACP, bit 1 (value 0x02) enables time-lock. Setting args[21] to 0x03 (binary: 00000011) sets both bits, enabling both features simultaneously. A cell with both ACP and time-lock can receive funds from anyone at any time, but the owner cannot withdraw until the time-lock expires. This is useful for crowdfunding cells or commitment schemes."
+    },
+    {
+      "id": 8,
+      "question": "How does Omnilock Mode 0x01 verify an Ethereum signature — what makes it different from verifying a CKB signature?",
+      "options": [
+        "Ethereum signatures use SHA-256 while CKB uses blake2b; Omnilock switches hash functions",
+        "Ethereum signatures use the personal_sign prefix ('\\x19Ethereum Signed Message:\\n32') before the message hash; Omnilock includes this prefix when recovering the signer's address",
+        "Ethereum signatures are 32 bytes shorter than CKB signatures due to EIP-191",
+        "There is no difference; both modes use identical secp256k1 signature verification"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Ethereum's personal_sign format prepends '\\x19Ethereum Signed Message:\\n' followed by the message length before hashing. This prevents signature replay attacks across different contexts. Omnilock Mode 0x01 knows about this prefix and includes it when computing the message hash for signature recovery. Without accounting for this prefix, the recovered address would not match the ETH address stored in args, and the transaction would be rejected. This is what makes MetaMask-signed CKB transactions work correctly."
+    }
+  ]
+}

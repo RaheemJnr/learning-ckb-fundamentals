@@ -1,0 +1,448 @@
+# Advanced Cell Management
+
+## Overview
+
+CKB's Cell Model shares its UTXO heritage with Bitcoin. Every unit of value — whether CKB capacity, xUDT tokens, Spore NFTs, or any protocol state — lives in a discrete cell. Cells are created by transactions, consumed by transactions, and never modified in place. Over time, this creates the same problem Bitcoin users know well: **fragmentation**.
+
+Understanding how to manage cells efficiently separates production-quality wallets and dApps from naive implementations that degrade under real usage.
+
+## Why Cell Management Matters
+
+In an account-based blockchain like Ethereum, your balance is a single number in contract storage. Sending and receiving ETH updates that number — no structural overhead per transaction.
+
+In CKB (and Bitcoin), your balance is the sum of many discrete cells. Each transaction you participate in creates new cells and destroys old ones. After thousands of transactions:
+
+- A wallet may hold hundreds of small cells instead of a few large ones
+- Each transaction that spends many cells incurs proportionally higher fees
+- Querying your balance requires scanning all your cells via the RPC
+- Applications that process many inputs simultaneously face quadratic overhead
+
+Addressing this requires deliberate cell management strategy.
+
+## Minimum Cell Capacity: The Storage Rent Model
+
+CKB uses **occupied capacity** as its state cost model. Instead of paying an ongoing rent fee (like storage gas in Ethereum), you commit CKB capacity upfront. The committed amount must be at least as large as the bytes the cell occupies.
+
+### Minimum Capacity Calculation
+
+```
+Field           | Bytes
+────────────────┼──────
+capacity        | 8
+lock.code_hash  | 32
+lock.hash_type  | 1
+lock.args       | 20   (secp256k1-blake160 args)
+────────────────┼──────
+Total (no type, no data): 61 bytes = 61 CKB minimum
+```
+
+Adding a type script:
+```
++ type.code_hash  | 32
++ type.hash_type  | 1
++ type.args       | 32   (varies by protocol)
+────────────────────────
+xUDT cell: 61 + 65 + 16 (data) = 142 CKB minimum
+```
+
+Adding data:
+```
++ data field      | variable
+────────────────────────────
+Spore NFT (1 KB content): 61 + 65 + 1024 = 1150 CKB minimum
+```
+
+The formula: **1 byte of cell size = 1 CKB of minimum capacity = 10^8 shannon**.
+
+When you destroy a cell (consume it as an input without creating a matching output), the capacity is freed — you get your CKB back. This is CKB's "storage refund" model.
+
+## Cell Fragmentation: The Problem
+
+Fragmentation happens when your cells accumulate into many small units instead of few large ones. Here is how it builds up over time:
+
+### Sources of Fragmentation
+
+**1. Receiving many payments**
+
+Each incoming transaction creates a new output cell with your lock script. After 100 small payments, you have 100 cells. In Bitcoin this is called "small UTXOs"; in CKB these are "small cells."
+
+**2. Change cells**
+
+Every time you send a transaction and your input capacity exceeds the output capacity (plus fee), the excess goes into a change cell. A wallet that processes one transaction per day creates at least one change cell per day.
+
+**3. Token airdrops and distributions**
+
+Token distributions often create one cell per recipient. If you receive 10 different token types, that's 10 new cells in your wallet — even before any change cells from subsequent token transfers.
+
+**4. Protocol outputs**
+
+Some dApp interactions create cells as part of their protocol: vesting tranches, governance receipts, staking positions. Each is a new cell.
+
+### Consequences of Fragmentation
+
+| Impact | Description |
+|--------|-------------|
+| Higher fees | More inputs in a transaction = larger serialized tx = higher fee |
+| Slower queries | Querying 500 cells via RPC is 10x slower than querying 50 |
+| Script overhead | Type scripts that iterate all group inputs are O(n) per cell |
+| Poor UX | Balance calculation and coin selection take longer |
+
+### Fragmentation vs Bitcoin UTXOs
+
+CKB's fragmentation problem is directly analogous to Bitcoin's "UTXO bloat" problem. The mitigation strategies are also similar: consolidation transactions that sweep many inputs into fewer outputs.
+
+The key difference: CKB cells can carry data and type scripts, so fragmentation is more complex. A Bitcoin UTXO consolidation is always safe. A CKB cell consolidation that mixes typed cells (xUDT, Spore) with plain CKB cells may trigger unexpected type script execution.
+
+## Cell Consolidation Strategy
+
+Consolidation is a transaction pattern: many inputs, few outputs, net fee burned.
+
+```
+CONSOLIDATION TRANSACTION
+
+Inputs:  [cell-1: 200 CKB] [cell-2: 200 CKB] ... [cell-100: 200 CKB]
+Outputs: [consolidated-cell: ~19,990 CKB]
+Fee:     ~10 CKB (0.05% of total)
+```
+
+### Consolidation Limits
+
+CKB transactions have a maximum serialized size (~512 KB). Each input occupies ~44 bytes (32-byte outpoint + 8-byte since field + overhead). At 44 bytes per input, you can fit approximately 100-200 inputs per consolidation transaction.
+
+For larger cell sets, use multi-round consolidation:
+
+```
+Round 1 (5 parallel transactions):
+  Tx 1: inputs[0..199]   -> cell-batch-1 (3,980 CKB)
+  Tx 2: inputs[200..399] -> cell-batch-2 (3,980 CKB)
+  Tx 3: inputs[400..599] -> cell-batch-3 (3,980 CKB)
+  Tx 4: inputs[600..799] -> cell-batch-4 (3,980 CKB)
+  Tx 5: inputs[800..999] -> cell-batch-5 (3,980 CKB)
+
+Round 2 (1 transaction):
+  Tx 6: [cell-batch-1..5] -> final-cell (19,890 CKB)
+```
+
+Total: 6 transactions to consolidate 1000 cells. Each round-1 transaction is independent and can be submitted in parallel.
+
+### When to Consolidate
+
+- Cell count exceeds 50 (moderate fragmentation) or 200 (severe fragmentation)
+- Before a large transaction that requires significant input capacity
+- During off-peak hours (mempool less congested, fees lower)
+- When consolidation fee < future fee savings from having fewer inputs
+
+### Important: Typed Cell Separation
+
+**Never consolidate typed cells with plain CKB cells in the same transaction** unless you understand the type script's validation rules. An xUDT type script will run for every xUDT cell in the transaction and enforce token conservation. Mixing token cells and plain cells in a "consolidation" creates complex validation requirements.
+
+Best practice:
+- Consolidate plain CKB cells separately
+- Consolidate xUDT cells for a specific token type separately
+- Consolidate Spore NFTs only if they share the same type script (same NFT collection type)
+
+## Cell Splitting for Parallel Spending
+
+Splitting breaks a large cell into many smaller cells. This enables parallel transaction submission.
+
+### Why Parallelism Matters
+
+In Ethereum, all transactions from an account are serialized by nonce. You cannot send two transactions simultaneously — the second must wait for the first to be mined and its nonce confirmed.
+
+In CKB, there are no nonces. Two transactions are compatible as long as they don't spend the same cell. By splitting one large cell into five smaller ones:
+
+```
+Before: 1 cell (10,000 CKB)
+        -> can only submit 1 transaction at a time
+
+After:  5 cells (2,000 CKB each)
+        -> can submit 5 transactions simultaneously
+        -> each tx spends a different cell, no conflict
+```
+
+This is particularly valuable for:
+
+- **High-frequency trading bots**: Submit multiple order-matching txs per block
+- **dApp treasury management**: Serve many users simultaneously from a shared account
+- **Token distributions**: Pre-split the distribution pool for parallel sending
+- **State channel setup**: Each channel needs its own independent cell
+
+### Splitting Constraints
+
+Each output cell must meet the minimum capacity requirement. The maximum parallelism is:
+
+```
+max_parallelism = (source_capacity - fee) / minimum_cell_capacity
+                = (10,000 CKB - 0.01 CKB) / 61 CKB
+                ≈ 163 cells maximum
+```
+
+In practice, use cells larger than the minimum to keep sufficient capacity for fees when each split cell is later spent.
+
+## Dust Cells: Definition and Cleanup
+
+### What is a Dust Cell?
+
+A **dust cell** is a cell at or below the minimum capacity threshold (61 CKB for plain cells). All of its capacity pays for the cell's structural overhead — none of it is "free" CKB that can be extracted without destroying the cell.
+
+A **subeconomic cell** is more nuanced: a cell where the cost to spend it (transaction fee allocation) exceeds the excess capacity recovered. For example, a 62 CKB cell has 1 CKB of excess capacity. If spending it costs 0.01 CKB in fees, it's barely worth it. If fees are 2 CKB, it's not.
+
+### Where Dust Comes From
+
+- Minimum-capacity cells created by protocols (e.g., a Spore NFT cell holds the minimum capacity for its data size, with no excess)
+- Fee calculation rounding that produces tiny change cells
+- Deprecated protocol cells where the capacity was sized for old fee rates
+- Split operations that don't account for future spend fees
+
+### Sweeping Dust Efficiently
+
+The most efficient dust cleanup strategy is batch sweeping:
+
+```
+DUST SWEEP TRANSACTION
+
+Inputs:  [large-cell: 5000 CKB]        <- covers the fee
+         [dust-1:     61 CKB]          <- swept
+         [dust-2:     61 CKB]          <- swept
+         ...
+         [dust-50:    61 CKB]          <- swept
+
+Outputs: [output-cell: ~5003 CKB]      <- target payment
+         [change-cell: ~2058 CKB]      <- change with dust reclaimed
+
+Net: 50 × 61 CKB = 3,050 CKB reclaimed from dust
+```
+
+The large input covers the fee. The dust inputs add capacity to the output side. You reclaim the dust as part of your change cell.
+
+## Cell Selection Algorithms
+
+When building a transaction that needs X CKB of input capacity, which cells do you pick from your available set?
+
+### Smallest First
+
+Sort available cells by capacity ascending. Pick cells until the sum meets or exceeds the target.
+
+**Pros:** Uses up small cells over time, naturally reduces fragmentation
+**Cons:** Requires more inputs per transaction (higher fee)
+**Best for:** Background consolidation, when fragmentation reduction is the priority
+
+### Largest First
+
+Sort available cells by capacity descending. Pick cells until the sum meets or exceeds the target.
+
+**Pros:** Fewest inputs = smallest transaction = lowest fee
+**Cons:** Leaves small cells untouched, fragmentation grows over time
+**Best for:** Cost-sensitive applications, when fee efficiency is the priority
+
+### Best Fit
+
+Find the single cell (or combination) closest to the required amount.
+
+**Pros:** Minimizes change cell, sometimes produces zero change
+**Cons:** May leave awkward cell sizes in the pool
+**Best for:** Exact-match scenarios, reducing UTXO count by eliminating change
+
+### Branch and Bound (Optimal)
+
+Exhaustive combinatorial search for the subset of cells that exactly matches the target (no change needed).
+
+**Pros:** Optimal fee efficiency, eliminates change cells
+**Cons:** O(2^n) worst case — only practical for small cell sets (< 20 cells)
+**Best for:** Final-round consolidation, high-value transfers where fees matter
+
+### Comparison
+
+```
+Available: 15 cells (100 CKB each) + 5 cells (1000 CKB each)
+Target:    300 CKB
+
+Strategy       | Inputs | Fee (est.) | Change
+───────────────┼────────┼────────────┼─────────────
+Smallest first | 3      | 0.031 CKB  | 0 CKB (exact!)
+Largest first  | 1      | 0.011 CKB  | 699 CKB
+Best fit       | 3×100  | 0.031 CKB  | 0 CKB (same here)
+```
+
+The "right" strategy depends on your goals. Most production wallets use a hybrid: largest-first for normal transactions, smallest-first for periodic consolidation passes.
+
+## Cell Reservation for dApps
+
+Production dApps must carefully manage their operational cell inventory.
+
+### Operational Cell Pools
+
+A dApp that submits N transactions per block needs N operational cells ready at all times:
+
+```
+Operational pool: 20 cells × 200 CKB each = 4,000 CKB reserved
+  -> Can submit up to 20 transactions per block
+  -> Each transaction spends one operational cell (for fees)
+  -> After each block: replenish consumed cells from treasury
+```
+
+Without this pool, the dApp must split a large treasury cell before every transaction — doubling the latency of every operation.
+
+### Protocol State Cell Isolation
+
+A dApp's "state cells" (global config, pool reserves, counters) must never be accidentally swept as fee payers:
+
+1. Use a **dedicated lock key** for state cells (separate from the operational key)
+2. Mark state cells with a **sentinel type script** — a minimal type script that exists only to identify the cell's role
+3. In your cell selection logic, **explicitly exclude** cells with sentinel type scripts
+4. Optionally, query state cells by type script hash to retrieve them efficiently
+
+### Capacity Planning Formula
+
+```
+reserved_cells >= peak_daily_txs / txs_per_block × safety_margin
+
+Example:
+  peak_daily_txs = 1000
+  txs_per_block  = 50  (assuming 10 sec/block, 100 tps)
+  safety_margin  = 2x
+
+  reserved_cells >= 1000 / (50 × 24 × 360) × 2
+                 = at minimum, maintain a pool sized for peak burst
+```
+
+## Optimal Cell Size
+
+The optimal cell size depends on how frequently the cell is spent and the acceptable fee ratio.
+
+### Calculation
+
+For a target fee tolerance `t` (fraction of cell value):
+
+```
+fee_to_spend ≈ base_fee + per_input_fee
+             ≈ 0.01 CKB + 0.001 CKB = ~0.011 CKB
+
+optimal_excess_capacity > fee_to_spend / fee_tolerance
+
+At 0.1% tolerance:  excess > 11 CKB  -> cell > 72 CKB
+At 0.5% tolerance:  excess > 2.2 CKB -> cell > 63.2 CKB
+At 1.0% tolerance:  excess > 1.1 CKB -> cell > 62.1 CKB
+```
+
+### Practical Size Tiers
+
+| Tier | Range | When to Use |
+|------|-------|-------------|
+| Minimum | 61 CKB | Protocol-required minimum cells (Spore NFTs, state anchors) |
+| Small | 61-100 CKB | Acceptable for protocol cells, avoid for wallets |
+| Medium | 100-500 CKB | General-purpose wallet cells |
+| Standard | 500-5000 CKB | Production wallet target range |
+| Large | 5000+ CKB | High-value accounts; split for parallel spending |
+
+### Target Cell Count
+
+For a wallet holding 100,000 CKB:
+
+```
+Recommended:  20-50 cells × 2,000-5,000 CKB each
+  -> Good fee efficiency
+  -> Enough parallelism for most use cases
+  -> Easy to manage
+
+Too fragmented: 1000 cells × 100 CKB each
+  -> High fee overhead
+  -> Slow queries
+  -> Consolidation needed
+
+Too consolidated: 1 cell × 100,000 CKB
+  -> No parallelism
+  -> Any transaction must split first (2 tx instead of 1)
+  -> Split for better UX
+```
+
+## The Input Selection Problem: CKB vs Bitcoin
+
+CKB's cell management challenges are directly analogous to Bitcoin's UTXO input selection problem. Decades of Bitcoin research applies:
+
+| Property | CKB | Bitcoin |
+|----------|-----|---------|
+| Discrete value units | Cells (capacity in CKB) | UTXOs (value in satoshis) |
+| Minimum unit | 61 CKB (enforced by scripts) | 546 sats (P2PKH dust limit) |
+| Fee model | Proportional to tx byte size | Proportional to tx byte size |
+| State cost | Capacity locked upfront | None (UTXO set growth is "free") |
+| Parallel spending | Natural (different cells) | Natural (different UTXOs) |
+| Input selection | Same algorithms applicable | Branch and bound, etc. |
+| Fragmentation source | Change + protocol outputs | Change + received payments |
+
+Key difference: CKB's capacity model means cells have **structural minimum costs**. A Bitcoin UTXO can hold 1 satoshi (impractical, but valid). A CKB cell must hold at least 61 CKB — making "dust" a larger problem in absolute terms but ensuring no "free" state bloat.
+
+## Tutorial
+
+### Step 1: Setup
+
+```bash
+cd lessons/17-cell-management
+npm install
+```
+
+### Step 2: Run the Demo
+
+```bash
+npm start
+```
+
+The demo runs all cell management analyses in sequence:
+1. Capacity calculation for different cell types
+2. Fragmentation analysis on a 50-cell set
+3. Consolidation planning with batch strategy
+4. Split planning for a 10,000 CKB cell
+5. Dust cell classification and cleanup advice
+6. Strategy comparison for input selection
+7. dApp reservation pattern guidance
+8. Optimal cell size calculations
+
+### Step 3: Key Functions
+
+```typescript
+calculateMinimumCapacity(lockArgsLength, hasTypeScript, typeArgsLength, dataLength)
+// Returns minimum capacity in shannon for a cell with the given dimensions
+
+planConsolidation(cells, targetOutputCount)
+// Plans batched consolidation with fee estimates and round counts
+
+planCellSplit(sourceCell, targetCellCount, capacityPerOutput?)
+// Plans a split transaction with parallelism analysis
+
+analyzeDustCells(cells)
+// Classifies cells as dust/subeconomic/valuable with cleanup advice
+
+compareSelectionStrategies(cells, targetCapacity)
+// Runs all three strategies and compares inputs/fees/change
+
+calculateOptimalCellSize(feeTolerance)
+// Returns minimum cell size for a given fee tolerance target
+```
+
+### Step 4: Exercise
+
+Design a cell management policy for a hypothetical DEX:
+- The DEX processes 500 transactions per hour
+- Each transaction requires an operational cell for fees
+- The DEX holds a 1,000,000 CKB treasury
+- Users hold xUDT token cells they swap through the DEX
+- Answer: How many operational cells? What size? How often to consolidate?
+
+## Summary
+
+Cell management in CKB is the operational art of maintaining an efficient cell inventory:
+
+- **Minimum capacity** is the structural storage cost of a cell — you cannot avoid it
+- **Fragmentation** is the natural consequence of UTXO-model usage — manage it proactively
+- **Consolidation** reduces cell count at the cost of transaction fees
+- **Splitting** increases parallelism at the cost of one consolidation fee upfront
+- **Dust cells** are at or below minimum capacity — sweep them with larger inputs
+- **Input selection strategy** trades off fee efficiency against fragmentation
+- **Cell reservation** ensures dApps have operational cells ready when needed
+- **Typed cell isolation** prevents accidental type script triggering during consolidation
+
+Good cell management is invisible to end users but critical to the performance, cost, and reliability of production CKB applications.
+
+## What's Next
+
+In Lesson 18, you will explore the **CKB RPC Dashboard** — building a real-time monitoring application that queries the CKB node for blocks, transactions, cells, and network statistics.

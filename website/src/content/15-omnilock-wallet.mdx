@@ -1,0 +1,332 @@
+# Omnilock: Universal Lock
+
+## Overview
+
+CKB's Cell Model gives developers enormous flexibility in choosing how cells are protected. The native secp256k1-blake160 lock script works well for CKB-native wallets, but users from Ethereum, Tron, Bitcoin, and other chains each need their own lock format. Deploying a separate script for every chain creates fragmentation, increases security audit surface, and makes cross-chain dApp development difficult.
+
+**Omnilock** solves all of this with a single on-chain program that understands multiple signature formats. One deployment, one code hash, many authentication methods — all controlled by a single flag byte.
+
+## Why Omnilock Matters
+
+Consider the alternative without Omnilock:
+
+- An Ethereum-compatible wallet needs its own `eth-lock` script deployed
+- A Tron wallet needs its own `tron-lock` script deployed
+- Each deployment costs CKB capacity, requires audits, and has independent bugs
+- dApps must integrate with each lock separately
+
+With Omnilock:
+- One audited, community-maintained binary handles everything
+- A single flag byte (`args[0]`) selects the signature verification logic
+- dApps call Omnilock's well-known code hash regardless of user's wallet type
+- New signature modes can be added without changing deployed code hashes
+
+This is composability in action: one primitive that the entire ecosystem builds on.
+
+## The Auth Bytes Structure
+
+Every Omnilock lock script's `args` field begins with 21 bytes called the **auth bytes**:
+
+```
+args[0]      : 1 byte   — Auth flag (selects the authentication mode)
+args[1..20]  : 20 bytes — Auth content (key hash, address, or other identity data)
+```
+
+These 21 bytes are always required. They unambiguously identify:
+1. How to verify the signature (the flag)
+2. Who the authorized party is (the content)
+
+Additional bytes beyond position 20 control optional features (ACP, time locks).
+
+## Auth Modes Reference Table
+
+| Flag | Mode | Auth Content | Signature Format |
+|------|------|-------------|-----------------|
+| `0x00` | secp256k1-blake160 | `blake160(secp256k1_pubkey)` | Same as CKB native lock |
+| `0x01` | Ethereum | `keccak160(eth_pubkey)` = ETH address | Ethereum `personal_sign` |
+| `0x02` | EOS | EOS public key hash | EOS signing format |
+| `0x03` | Tron | Tron address hash | Tron signing format |
+| `0x04` | Bitcoin | Bitcoin P2PKH hash | Bitcoin signing format |
+| `0x05` | Dogecoin | Dogecoin address hash | Dogecoin signing format |
+| `0x06` | CKB Multi-sig | `blake160(multisig_script)` | M-of-N threshold sigs |
+| `0x07` | Lock script | `blake160(lock_script_bytes)` | Delegated to another lock |
+| `0xFE` | Owner lock | `blake160(owner_lock)` | Based on owner's existing lock |
+
+The beauty of this design: the Omnilock RISC-V binary contains all verification logic for every mode. CKB-VM simply runs the same program; the flag byte steers execution to the appropriate code path.
+
+## Mode 0x00: secp256k1-blake160
+
+This is the default CKB authentication mode, implemented inside Omnilock for users who want Omnilock's optional features (ACP, time locks) with standard CKB keys.
+
+```
+Auth flag    : 0x00
+Auth content : blake160(compressed_secp256k1_pubkey)
+             = first 20 bytes of blake2b-256(33-byte_pubkey)
+```
+
+When verifying:
+1. Omnilock reads the 65-byte secp256k1 signature from the witness
+2. Recovers the public key from the signature over the transaction hash
+3. Computes `blake160(recovered_pubkey)`
+4. Checks it equals `args[1..20]`
+
+A cell using Mode 0x00 Omnilock is functionally equivalent to the native secp256k1-blake160 lock, but gains access to ACP and time-lock extensions.
+
+## Mode 0x01: Ethereum Auth
+
+This mode is what powered **Portal Wallet** and enables MetaMask users to hold CKB assets without generating a new keypair.
+
+```
+Auth flag    : 0x01
+Auth content : keccak160(uncompressed_eth_pubkey)
+             = last 20 bytes of keccak256(64-byte_pubkey_without_prefix)
+             = the standard Ethereum address
+```
+
+The signature verification uses Ethereum's `personal_sign` format. When MetaMask calls `eth_sign`, it prepends a standard prefix before the message:
+
+```
+"\x19Ethereum Signed Message:\n" + len(message)
+```
+
+Omnilock knows about this prefix and accounts for it during signature recovery.
+
+From a user's perspective:
+1. A dApp generates the CKB transaction
+2. It formats the transaction hash as an Ethereum personal_sign request
+3. The user approves in MetaMask
+4. The 65-byte signature goes into the CKB witness
+5. Omnilock recovers the ETH address and verifies it matches `args[1..20]`
+
+The result: **an Ethereum user's existing address directly controls CKB cells**. No new seed phrases. No new wallets. No complex onboarding.
+
+## Mode 0x06: M-of-N Multisig
+
+Omnilock supports threshold signatures natively. This enables:
+- **Treasury management**: a foundation's funds require 3-of-5 board signatures
+- **DAO governance**: protocol upgrades need 4-of-7 committee members
+- **Team vesting**: employee tokens need founder + HR approval to claim
+
+The multisig configuration is encoded as a small script:
+
+```
+Byte 0   : 0x00 (reserved, must be zero)
+Byte 1   : require_first_n (must include sigs from first N ordered signers)
+Byte 2   : threshold M (minimum signatures required)
+Byte 3   : pubkeys_count N (total possible signers)
+Bytes 4+ : N × 20-byte pubkey hashes (blake160 of each signer's pubkey)
+```
+
+The auth content (`args[1..20]`) is `blake160(multisig_script_bytes)` — a commitment to the configuration without storing the full config on-chain.
+
+To spend a multisig cell:
+1. The transaction witness includes all required signatures
+2. The witness also includes the full multisig script bytes (not just the hash)
+3. Omnilock hashes the provided script and verifies it matches `args[1..20]`
+4. It then verifies each signature against its signer's pubkey in the script
+
+This design keeps args compact (only 21 bytes for any threshold config) while still being fully verifiable.
+
+## Anyone-Can-Pay (ACP) Mode
+
+ACP is the first optional extension, enabled by setting bit 0 of the `omnilockFlags` byte at `args[21]`:
+
+```
+args[21] = 0x01   // bit 0 = ACP enabled
+args[22] = minCkbExponent   // minimum CKB increment (0 = no minimum)
+args[23] = minUdtExponent   // minimum UDT increment (0 = no minimum)
+```
+
+### What ACP Does
+
+Normally, spending a cell requires the owner's signature. This means you cannot receive funds unless you (the owner) are online and willing to sign the receiving transaction. For many use cases — payment addresses, donation boxes, service endpoints — this is a poor user experience.
+
+ACP inverts this: a cell with ACP enabled allows **anyone** to add value to it, subject to these rules:
+1. The output cell must have the same lock script as the input (funds go back to owner)
+2. The output must contain at least as much value as the input (no withdrawing)
+3. The minimum increment rule is satisfied
+
+The ACP cell acts like a public top-up address. Senders can pay without involving the recipient at all.
+
+### Minimum Amount Configuration
+
+The exponent bytes prevent dust attacks (tiny payments that waste chain capacity):
+
+```
+Minimum CKB increment = 10^minCkbExponent shannon
+Minimum UDT increment = 10^minUdtExponent (token's smallest unit)
+```
+
+Examples:
+- `minCkbExponent = 0` → no minimum (any amount)
+- `minCkbExponent = 8` → minimum 10^8 shannon = 1 CKB
+- `minCkbExponent = 10` → minimum 10^10 shannon = 100 CKB
+
+### ACP Use Cases
+
+- **Payment addresses**: Receive CKB or xUDT without being online
+- **Service accounts**: Smart contracts that accumulate fees
+- **Donation cells**: Community fundraising addresses
+- **Liquidity provision**: DeFi protocols receiving deposits
+
+## Time Locks
+
+Time locks are enabled by bit 1 of `omnilockFlags` (`args[21] & 0x02`):
+
+```
+args[21] = 0x02   // bit 1 = time-lock enabled
+args[24..31]      // 8-byte "since" value defining the lock expiry
+```
+
+The 8-byte since value uses the same encoding as CKB's transaction `since` field:
+
+```
+Bits 63-62 : type  (00 = block number, 01 = epoch, 10 = timestamp)
+Bit  63    : relative (1) or absolute (0)
+Bits 47-0  : the value (block height, epoch number, or unix seconds)
+```
+
+### Time Lock Use Cases
+
+- **Vesting schedules**: Team tokens locked until `timestamp >= cliff_date`
+- **Bonds**: Protocol bonds that mature after N epochs
+- **Dispute windows**: State channel funds locked during challenge period
+- **Inheritance**: Backup keys that activate after N years of inactivity
+
+### Combining ACP and Time Locks
+
+The flags are a bitmask and can be combined:
+
+```
+args[21] = 0x03  // both ACP (bit 0) and time-lock (bit 1)
+```
+
+A cell with both flags:
+- Accepts donations from anyone (ACP)
+- But the owner cannot withdraw until the time-lock expires
+
+This creates a trustless **crowdfunding cell**: anyone can contribute, but the project owner's access is delayed until a milestone date.
+
+## Building Omnilock Addresses
+
+An Omnilock address is simply a CKB address encoding of the Omnilock lock script:
+
+```typescript
+// Mode 0x01: Ethereum user at address 0x742d...f44e
+const lockScript = {
+  codeHash: "0xf329effd1c475a2978453c8600e1eaf0bc2087ee093c3ee64cc96ec6847752cb",
+  hashType: "type",
+  args: "0x01" + "742d35cc6634c0532925a3b844bc454e4438f44e"
+  //    ^^^^^ flag: Ethereum mode
+  //         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ETH address (20 bytes)
+};
+```
+
+The resulting CKB address (bech32m encoded) is what the ETH user shares with others. It looks like any CKB address but is secretly controlled by their MetaMask key.
+
+## Cross-Chain Auth: The Big Picture
+
+Omnilock's multi-mode architecture enables something profound: **a single blockchain (CKB) that can be natively used by wallet holders from any chain**.
+
+From a security standpoint, this is sound. CKB does not need to trust any external chain. The signature is verified on-chain by Omnilock using the exact same cryptographic primitives that the source chain uses. If an Ethereum wallet signs a CKB transaction, Omnilock runs the same secp256k1 signature recovery that Ethereum nodes run.
+
+From a UX standpoint:
+- ETH users get their first CKB address for free (just use their existing address)
+- No bridge required for key management (just asset bridging)
+- One hardware wallet can manage assets on multiple chains
+- dApps can serve the entire Web3 audience without wallet-specific integrations
+
+## JoyID: Passkeys via Omnilock
+
+JoyID wallet demonstrates Omnilock's extensibility at its best. JoyID uses the WebAuthn standard, which authenticates users with device biometrics (Face ID, Touch ID, Windows Hello).
+
+WebAuthn uses P-256 (secp256r1) elliptic curve signatures — not the secp256k1 used by most blockchains. JoyID implements P-256 signature verification in RISC-V and deploys it as an Omnilock extension.
+
+The result:
+- User creates a CKB wallet secured by their phone's secure enclave
+- No seed phrase, no private key backup
+- Face ID or Touch ID approves CKB transactions
+- The passkey credential is tied to the device's hardware security chip
+
+This is only possible because:
+1. CKB-VM executes arbitrary RISC-V code
+2. Omnilock's design allows new auth modes without redeploying the core script
+3. The CKB community can innovate on authentication independently
+
+## Step-by-Step Tutorial
+
+### Step 1: Install Dependencies
+
+```bash
+cd lessons/15-omnilock-wallet
+npm install
+```
+
+### Step 2: Run the Demo
+
+```bash
+npm start
+```
+
+The demo will:
+1. Connect to CKB testnet
+2. Explain each Omnilock mode with byte-level detail
+3. Show how to build args for Mode 0x00, 0x01, and 0x06
+4. Demonstrate ACP configuration
+5. Explain time-lock encoding
+6. Print the full auth modes summary table
+
+### Step 3: Explore the Code
+
+Open `src/index.ts`. Key functions to study:
+
+```typescript
+buildOmnilockArgs(authFlag, authContent, omnilockFlags?)
+// Assembles the args bytes for any Omnilock mode
+
+buildAcpOmnilockArgs(authFlag, authContent, minCkbExp, minUdtExp)
+// Assembles args for ACP-enabled Omnilock
+
+buildMultisigScript(threshold, pubkeyHashes, requireFirstN?)
+// Builds the multisig configuration script for Mode 0x06
+```
+
+### Step 4: Experiment
+
+Modify the example values:
+- Change the `threshold` in Mode 0x06 (try 3-of-5 vs 2-of-3)
+- Change `minCkbExp` in the ACP example (try 8 for 1 CKB minimum)
+- Combine ACP + time-lock by setting `omnilockFlags = 0x03`
+
+## Transaction Witness Format
+
+When spending an Omnilock cell, the witness must be formatted correctly. The witness layout for each mode:
+
+**Mode 0x00 and 0x01:**
+```
+witness = lock_field_bytes (65-byte secp256k1/ecdsa signature)
+```
+
+**Mode 0x06:**
+```
+witness = signatures (M × 65 bytes) + multisig_script_bytes
+```
+
+The witness is placed in the first input's witness field. Omnilock reads it via the `load_witness` syscall.
+
+## Summary
+
+Omnilock is a production-deployed universal lock that:
+
+- Uses a 1-byte flag to select from 9+ authentication modes
+- Stores a 20-byte auth content identifying the authorized party
+- Supports ACP (receive-without-signature) via the omnilockFlags byte
+- Supports time locks using CKB's standard since encoding
+- Powers JoyID (passkeys), Portal Wallet (MetaMask), and cross-chain dApps
+- Enables true cross-chain asset control without bridges for key management
+
+The pattern of "flag + content" in a single args field is reusable: many CKB protocols follow similar designs for flexible, upgradeable authorization.
+
+## What's Next
+
+In Lesson 16, you will explore **CKB Composability Patterns** — how multiple scripts can interact in a single transaction, building sophisticated protocols from simple, independently-deployed components.

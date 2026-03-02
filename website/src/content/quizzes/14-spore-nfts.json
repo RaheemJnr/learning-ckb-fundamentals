@@ -1,0 +1,101 @@
+{
+  "lessonId": 14,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What is the most important distinguishing feature of Spore Digital Objects compared to traditional NFTs like ERC-721?",
+      "options": [
+        "Spore NFTs use a faster blockchain with lower gas fees than Ethereum",
+        "Spore stores all content fully on-chain and locks CKB tokens inside each object, giving it intrinsic value",
+        "Spore uses IPFS for storage but with stronger pin guarantees than Ethereum NFTs",
+        "Spore NFTs are compatible with the ERC-721 standard but deployed on CKB"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Spore Digital Objects have two core properties that distinguish them from traditional NFTs: (1) ALL content is stored directly in the cell's data field on the CKB blockchain -- there is no IPFS, no HTTP URL, no external server. (2) Creating a Spore locks CKB tokens inside it, giving every Spore an intrinsic floor value backed by real CKB that can always be recovered by melting. Traditional ERC-721 NFTs are entries in a smart contract's storage, usually pointing to off-chain content, with no protocol-level floor value."
+    },
+    {
+      "id": 2,
+      "question": "What happens to the CKB tokens locked inside a Spore when you 'melt' it?",
+      "options": [
+        "They are burned (permanently destroyed) to reduce CKB's total supply",
+        "They are sent to the Nervos Foundation treasury",
+        "They are returned to the original creator's address",
+        "They remain locked in the Spore contract permanently"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Melting is Spore's term for destroying a Digital Object. When you melt a Spore, the Spore cell is consumed as a transaction input, no new Spore cell is created as an output, and the CKB that was locked inside the Spore is returned to the creator. This is fundamentally different from 'burning' in most NFT standards, where sending to a dead address permanently destroys any associated value. With Spore melting, the CKB is always recoverable by the original creator."
+    },
+    {
+      "id": 3,
+      "question": "What are the four fields that every Spore cell's 'data' section (SporeData) contains?",
+      "options": [
+        "name, image_url, owner, and creation_date",
+        "token_id, metadata_uri, royalties, and license",
+        "content_type, content, cluster_id (optional), encoded with Molecule serialization",
+        "hash, signature, block_number, and creator_address"
+      ],
+      "correctAnswer": 2,
+      "explanation": "SporeData is a Molecule-encoded table with three fields: (1) content_type -- a MIME type string like 'text/plain' or 'image/png' that tells applications how to interpret the content; (2) content -- the actual raw bytes of the content (image data, text, audio, etc.) stored fully on-chain; and (3) cluster_id -- an optional 32-byte identifier referencing a Cluster cell that this Spore belongs to. All three fields are encoded using CKB's Molecule binary serialization format."
+    },
+    {
+      "id": 4,
+      "question": "Why does a recipient NOT need to own any CKB to receive a Spore Digital Object?",
+      "options": [
+        "CKB pays for all transaction fees on behalf of new users",
+        "The Spore cell already contains enough CKB capacity to cover its own existence on-chain",
+        "Spore uses a sidechain that has free transaction processing",
+        "Recipients automatically receive free CKB from the Spore faucet when they accept a transfer"
+      ],
+      "correctAnswer": 1,
+      "explanation": "When a Spore is created, the creator locks enough CKB inside the Spore cell to cover its own capacity requirement (the cell size in bytes). This means the Spore is self-funded -- it carries its own storage cost within it. When transferred to a new owner, the recipient's wallet receives a fully funded cell. The recipient does not need to provide any CKB, which eliminates a major barrier to mainstream adoption. This is unlike Ethereum ERC-721 transfers, where the recipient needs ETH for gas fees."
+    },
+    {
+      "id": 5,
+      "question": "What is a Spore Cluster and what problem does it solve?",
+      "options": [
+        "A cluster is a group of CKB nodes that validate Spore transactions faster",
+        "A cluster is an on-chain CKB cell that provides a name and description for a collection of related Spores",
+        "A cluster is an off-chain database that indexes all Spores by creator",
+        "A cluster is a smart contract that automatically creates Spores in batches"
+      ],
+      "correctAnswer": 1,
+      "explanation": "A Spore Cluster is a separate CKB cell with a Cluster type script. Its data field contains a Molecule-encoded ClusterData with two fields: name (human-readable collection name) and description (collection description). Spores can reference a Cluster's ID in their cluster_id field, associating them with the collection. The Spore type script validates that referenced Clusters exist on-chain. Clusters solve the problem of organizing related Spores into named collections (like albums, game item sets, or art series) without relying on any off-chain database."
+    },
+    {
+      "id": 6,
+      "question": "Why does creating a Spore with a large image require more CKB than creating one with a short text message?",
+      "options": [
+        "Image Spores pay higher protocol fees to compensate miners for extra computation",
+        "Spore charges a flat royalty that scales with the perceived market value of the content",
+        "CKB capacity is proportional to byte size, and larger content occupies more bytes in the cell data field",
+        "Image Spores require multiple cells while text Spores only need one"
+      ],
+      "correctAnswer": 2,
+      "explanation": "In CKB's capacity model, every byte of data stored on-chain requires 1 CKByte of locked capacity. The minimum capacity for a Spore is determined by the total byte size of all its fields: the capacity field itself (8 bytes), the lock script (typically 53 bytes), the type script (65 bytes), and the data field (content_type length + content length + optional cluster_id). A 500KB PNG image in the data field adds 500,000 bytes, requiring ~5,000 additional CKB to be locked compared to a short text message. All of this CKB is recoverable by melting."
+    },
+    {
+      "id": 7,
+      "question": "What is the Molecule binary serialization format used for in the Spore protocol?",
+      "options": [
+        "Molecule is CKB's smart contract language, similar to Solidity on Ethereum",
+        "Molecule is an encryption format that protects Spore content from unauthorized viewing",
+        "Molecule is CKB's binary serialization format for encoding structured data (like SporeData) in cell data fields",
+        "Molecule is a compression algorithm that reduces Spore content size to save CKB capacity"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Molecule is CKB's standard binary serialization format developed by Nervos. It is used throughout CKB to encode structured data stored in cell data fields. For Spore, SporeData and ClusterData are both encoded as Molecule tables. A Molecule table begins with a 4-byte total size (little-endian uint32), followed by field offsets (4 bytes each, little-endian), then the raw field data concatenated. The offset-based design allows efficient random access to any field without parsing the entire structure. Molecule is not a programming language, encryption scheme, or compression algorithm."
+    },
+    {
+      "id": 8,
+      "question": "Which of the following content types is unique to Spore and enables 'Programmable Digital Objects' with on-chain logic?",
+      "options": [
+        "image/svg+xml -- because SVG files can contain JavaScript",
+        "application/json -- because JSON can describe any data structure including code",
+        "application/lua -- because Lua scripts stored as Spore content define interactive on-chain behavior",
+        "text/markdown -- because Markdown supports embedded code blocks"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The 'application/lua' content type is uniquely powerful in the Spore ecosystem. By storing a Lua script as a Spore's content, developers create 'Programmable Digital Objects' (DOBs) whose behavior is defined entirely on-chain. A Lua DOB can dynamically change what it displays based on on-chain state (like block number, holder's CKB balance, or Nervos DAO participation), define rules for evolution or interaction with other DOBs, and compute its own properties at query time. The entire program is stored in the Spore's content field -- fully on-chain and immutable -- making the behavior permanently verifiable."
+    }
+  ]
+}

@@ -1,0 +1,101 @@
+{
+  "lessonId": 16,
+  "questions": [
+    {
+      "id": 1,
+      "question": "How does CKB achieve composability between protocols, given that scripts cannot call each other?",
+      "options": [
+        "CKB uses a special 'composability opcode' that allows one script to invoke another during execution",
+        "Composability is achieved by including multiple independent scripts in the same transaction — each validates the same proposed state transition, and ALL must return 0 for the transaction to succeed",
+        "CKB composability requires deploying a 'compositor contract' that coordinates between protocols via message passing",
+        "Scripts share a global memory space that allows indirect communication during transaction validation"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB scripts are independent validators that each see the same transaction. There are no cross-script calls. Composability arises because a single transaction can trigger multiple scripts simultaneously — for example, a token swap triggers the lock scripts of both parties AND the type scripts of both tokens. All scripts must return 0 for the transaction to be valid. This creates a logical AND over all protocol invariants without any script-to-script communication."
+    },
+    {
+      "id": 2,
+      "question": "What is an 'open protocol' in the context of CKB, and why is it considered permissionless?",
+      "options": [
+        "An open protocol requires registering with the Nervos Foundation and paying a deployment fee before others can use it",
+        "An open protocol is one deployed with hash_type 'data', where code_hash = blake2b(binary), making the script permanently accessible to anyone who knows this hash — no permission from the authors is needed",
+        "An open protocol allows any user to modify the script's code after deployment",
+        "An open protocol is only accessible during a whitelisted period after deployment"
+      ],
+      "correctAnswer": 1,
+      "explanation": "An open protocol is a script whose code_hash is a public identifier derived from its binary content. Anyone who knows this code_hash can reference the script in their cell deps and create cells that use it. There is no access control, no registration, and no payment required. With hash_type 'data', the code_hash equals blake2b(binary), so the reference is permanently pinned to an exact binary — it cannot be revoked or changed by the original deployers."
+    },
+    {
+      "id": 3,
+      "question": "In a token-gated access system on CKB, how does the gate type script verify that the spender holds the required token, without calling the xUDT script?",
+      "options": [
+        "The gate script calls xUDT's 'balanceOf' function via a syscall to check the balance",
+        "The gate script reads the transaction's input cells directly and checks if any input cell has a type_script_hash matching the required token type hash stored in the gate's args",
+        "The gate script reads an off-chain oracle that tracks token balances",
+        "The gate script and xUDT share a common memory region where balances are written"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The gate type script inspects the raw transaction data — specifically the type scripts of input cells. It reads its own args to get the required token type hash (the blake2b-256 hash of the xUDT type script for the target token). Then it scans all input cells looking for one with a matching type script hash. If found, the spender has proven they hold that token by including it in the transaction. No function call to xUDT is needed — just raw data inspection of the shared transaction."
+    },
+    {
+      "id": 4,
+      "question": "Why are re-entrancy attacks impossible in CKB's composability model?",
+      "options": [
+        "CKB has a ReentrancyGuard built into CKB-VM that automatically prevents recursive calls",
+        "Re-entrancy requires cross-contract calls and mutable state during execution. CKB scripts cannot call each other, and all state is proposed (not mutated) before scripts run — so there is no opportunity for a callback to re-enter a script mid-execution",
+        "CKB uses a call stack depth limit of 1, preventing any recursive calls",
+        "Re-entrancy is prevented by the gas limit, which is too low to support recursive patterns"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Re-entrancy attacks exploit the fact that a contract's storage can be in an inconsistent state mid-execution when an external call is made, and a malicious callback exploits this. CKB eliminates this attack vector entirely: scripts cannot call other scripts, and state is not modified during script execution (scripts only read the proposed transaction). All state transitions are committed atomically when the transaction is accepted. There is nothing for a callback to re-enter."
+    },
+    {
+      "id": 5,
+      "question": "What is the 'script-as-parameter' pattern in CKB composability?",
+      "options": [
+        "A pattern where a script binary is passed as data in a cell and executed dynamically",
+        "A pattern where a script embeds another script's blake2b-256 hash in its args, allowing the same binary to be configured to work with any referenced protocol (e.g., the same gate script works for any token type)",
+        "A pattern where scripts are parameterized by block numbers to create scheduled execution",
+        "A pattern where the script binary itself serves as the transaction's witness"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Script-as-parameter means embedding the blake2b-256 hash of another script into your script's args field. This hash uniquely identifies a protocol (e.g., a specific xUDT token type). At runtime, your script reads its args to get this hash and uses it to search for matching cells. The same binary can be deployed once and configured differently per cell just by changing the args — no redeployment needed. For example, a gate script with args=USDC_type_hash gates on USDC, while the same binary with args=BTC_type_hash gates on BTC."
+    },
+    {
+      "id": 6,
+      "question": "How does an atomic swap work on CKB, and why is atomicity guaranteed without a third-party escrow?",
+      "options": [
+        "Atomic swaps require a dedicated escrow contract that holds both assets until both parties confirm",
+        "CKB transactions are atomic by definition — either all inputs are consumed and all outputs are created, or nothing happens. A swap transaction with both parties' assets as inputs and each other's address as outputs cannot partially execute.",
+        "Atomicity is guaranteed by a time lock that gives both parties a window to back out",
+        "The CKB consensus layer has a special 'atomic swap' message type that coordinates between participants"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB transactions are atomic at the consensus level — a transaction either fully executes (all inputs consumed, all outputs created) or is entirely rejected. A swap transaction includes Alice's asset and Bob's asset as inputs, and the outputs assign Alice's asset to Bob and Bob's asset to Alice. Both Alice's lock script and Bob's lock script must return 0 (both must sign), ensuring neither party can extract value without giving value. There is no intermediate state — the swap either completes fully or not at all."
+    },
+    {
+      "id": 7,
+      "question": "What is the key difference between CKB's composability model and Solidity's regarding binary immutability?",
+      "options": [
+        "Both models allow binary changes only through DAO governance votes",
+        "In Solidity, an upgradeable proxy can silently change contract behavior for existing callers. In CKB, hash_type 'data' pins code_hash to blake2b(binary), guaranteeing the exact binary is used forever — no silent upgrades possible",
+        "CKB scripts can never be upgraded under any circumstances, while Solidity contracts can always be upgraded",
+        "Solidity contracts are content-addressed like CKB's data hash_type, making both equally immutable"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Solidity's upgradeability proxies (UUPS, TransparentProxy) allow contract logic to be replaced after deployment. Existing callers that integrated with the old logic can be silently affected. In CKB with hash_type 'data', the code_hash equals blake2b(binary_data). Any node can verify the code cell contains exactly the expected binary. If the binary changes even one byte, the hash changes and the reference breaks. This gives builders an ironclad guarantee: a script referenced by data hash will execute the same code forever."
+    },
+    {
+      "id": 8,
+      "question": "When building a dApp that needs fungible tokens, NFTs, and multi-wallet authentication, what is the recommended CKB design approach?",
+      "options": [
+        "Deploy a single monolithic smart contract that implements all three features from scratch to reduce deployment costs",
+        "Use xUDT for tokens, Spore for NFTs, and Omnilock for authentication — reusing existing open protocols. Write new scripts only for the dApp's unique logic, reducing new code that must be audited",
+        "Build custom implementations of all three to avoid dependencies on external protocols",
+        "Register with each protocol's governance system to get access to their integration APIs"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The recommended approach is to compose existing open protocols for well-understood primitives (xUDT for tokens, Spore for NFTs, Omnilock for authentication) and write new scripts only for your application-specific invariants. This approach reduces the amount of new code you introduce, leverages existing security audits, ensures your dApp integrates naturally with the broader CKB ecosystem (wallets, explorers, other dApps), and allows you to focus development effort on your unique value proposition rather than re-implementing common patterns."
+    }
+  ]
+}

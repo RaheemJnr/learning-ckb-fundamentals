@@ -1,0 +1,580 @@
+# Digital Objects with Spore
+
+## Overview
+
+In this lesson, you will explore the **Spore protocol**, CKB's framework for creating Digital Objects (DOBs) -- a new category of on-chain digital asset that goes far beyond what traditional NFT standards offer. Spore rethinks what it means to own something on a blockchain by making digital objects self-contained, fully on-chain, and backed by real economic value.
+
+By the end of this lesson, you will be able to:
+
+- Explain what Spore Digital Objects are and how they differ from ERC-721 NFTs
+- Describe the intrinsic value model: how CKB tokens lock inside every Spore
+- Read and interpret the Spore cell structure and Molecule-encoded data
+- Create Spores with different MIME content types
+- Understand Spore Clusters and how they organize collections
+- Explain melting and why it is economically unique to Spore
+- Compare Spore's economics to traditional NFT platforms
+
+## Prerequisites
+
+- Completion of Lessons 1-13 (especially Lessons 7, 10, 13 for scripts and type systems)
+- Node.js 18 or later
+- Familiarity with TypeScript and async/await
+
+## Concepts
+
+### What Is the Spore Protocol?
+
+Spore is an open protocol deployed on the CKB blockchain for creating **Digital Objects (DOBs)** -- on-chain assets that are fundamentally different from traditional NFTs in three critical ways:
+
+**1. Intrinsic Value**
+
+Every Spore Digital Object is backed by **locked CKB tokens**. When you create a Spore, you lock a quantity of CKB inside it proportional to the content size. That CKB is not "spent" or "burned" -- it is stored inside the Spore cell. If you destroy (melt) the Spore, you get every shannon back.
+
+This gives Spore a guaranteed minimum floor value regardless of market conditions. A Spore can never be worth less than the CKB locked inside it because you can always melt it and recover that value.
+
+**2. Fully On-Chain Storage**
+
+All Spore content -- the image, text, audio, video, or code -- is stored **directly in the cell's data field** on the CKB blockchain. There are no IPFS links, no HTTP URLs, no external servers. The content is part of the blockchain itself.
+
+This means Spore content is:
+- **Permanent**: It exists as long as the CKB blockchain exists
+- **Immutable**: The content cannot be changed after creation
+- **Censorship-resistant**: No company or government can take it down
+- **Verifiable**: Anyone can inspect the exact bytes on-chain
+
+**3. Zero-Cost Receiving**
+
+The recipient of a Spore does not need to own any CKB to receive it. Because the Spore cell already carries enough capacity (the CKB locked inside it), it is fully self-funded. This eliminates a major barrier to adoption: you can send a Spore to anyone with a CKB address, even if they have never interacted with the blockchain before.
+
+### How Spore Differs from Traditional NFTs
+
+Traditional NFTs like Ethereum's ERC-721 standard are entries in a smart contract's storage. The NFT is a mapping from a token ID to an owner address. The actual content (artwork, metadata) typically lives off-chain, often on IPFS or a centralized server.
+
+This architecture has several well-known problems:
+
+- **Broken links**: If the IPFS node goes offline or the server shuts down, NFT owners find their "collectibles" pointing to missing content
+- **Mutability**: Some NFT projects have updated the metadata pointed to by their tokens, changing what owners thought they bought
+- **No floor value**: The NFT has whatever value the market assigns, with no economic backing from the protocol
+- **Gas for receiving**: To receive an ERC-721 token, the recipient must have ETH for gas fees
+
+Spore solves every one of these problems by design.
+
+### Spore Cell Structure
+
+A Spore is a CKB cell with a specific structure that enforces the protocol's guarantees:
+
+```
+Cell {
+  capacity:  <CKB locked in shannons>      ← Intrinsic value stored here
+  lock:      <owner's lock script>          ← Who controls this Spore
+  type: {
+    code_hash: <Spore script code_hash>     ← Identifies Spore protocol
+    hash_type: "data1"
+    args:      <32-byte Spore ID>           ← Unique identifier
+  }
+  data: <Molecule-encoded SporeData {
+    content_type: bytes                     ← MIME type (e.g., "text/plain")
+    content:      bytes                     ← The actual content (ALL of it)
+    cluster_id:   bytes?                    ← Optional collection reference
+  }>
+}
+```
+
+**The Spore ID** is derived from the first input cell's OutPoint at creation time using the same TypeID mechanism used elsewhere in CKB. Because OutPoints are globally unique, Spore IDs are guaranteed to be globally unique -- you cannot create two Spores with the same ID.
+
+**The Spore type script** enforces the following rules:
+
+- **On creation**: The Spore ID must be correctly derived from the first input. The content_type and content must be non-empty. If a cluster_id is present, the referenced Cluster cell must exist in the transaction's cell deps.
+- **On transfer**: The SporeData (content_type, content, cluster_id) must be identical in the output. Only the lock script (owner) may change.
+- **On melt**: The creator's lock hash must appear in the transaction's inputs. No Spore output is created.
+
+### Molecule Serialization: How SporeData Is Encoded
+
+CKB uses **Molecule**, a binary serialization format developed by Nervos, to encode structured data stored in cells. SporeData is a Molecule table with three fields.
+
+A Molecule table is encoded as:
+
+```
+[total_size: u32 LE] [offset_0: u32 LE] [offset_1: u32 LE] [offset_2: u32 LE] [field_0] [field_1] [field_2]
+```
+
+Where:
+- `total_size` is the byte length of the entire encoded structure
+- `offset_N` is the byte position where field N starts (relative to the beginning)
+- Each field is a raw byte sequence with no length prefix (the offsets define boundaries)
+
+For a SporeData with content_type `"text/plain"` (10 bytes) and content `"Hello!"` (6 bytes) and no cluster_id:
+
+```
+Header (16 bytes):
+  [22 00 00 00]  total_size = 22 bytes
+  [10 00 00 00]  content_type starts at offset 16
+  [1a 00 00 00]  content starts at offset 26... wait, let me recalculate
+
+Actually with 3 fields, header = 4 + 3*4 = 16 bytes:
+  total = 16 + 10 + 6 + 0 = 32 bytes
+
+[20 00 00 00]  total_size = 32
+[10 00 00 00]  content_type offset = 16 (right after header)
+[1a 00 00 00]  content offset = 26 (16 + 10)
+[20 00 00 00]  cluster_id offset = 32 (26 + 6, empty)
+
+Then: 74 65 78 74 2f 70 6c 61 69 6e  ("text/plain")
+      48 65 6c 6c 6f 21               ("Hello!")
+      (empty cluster_id)
+```
+
+The Molecule format is efficient for on-chain storage because it allows direct field access without parsing the entire structure, and it has no overhead for empty optional fields.
+
+### Supported Content Types
+
+Spore uses standard MIME types to declare what kind of content is stored. This enables Spore-aware applications (wallets, marketplaces, explorers) to correctly interpret and display the content:
+
+| MIME Type | Description | Example Use |
+|-----------|-------------|-------------|
+| `text/plain` | Plain UTF-8 text | Poems, messages, quotes |
+| `text/markdown` | Markdown-formatted text | Rich text articles |
+| `image/png` | PNG raster image | Digital art, avatars |
+| `image/jpeg` | JPEG raster image | Photographs |
+| `image/svg+xml` | SVG vector graphic | Generative art, icons |
+| `image/gif` | Animated GIF | Animated art |
+| `audio/mp3` | MP3 audio | Music clips |
+| `video/mp4` | MP4 video | Short films |
+| `application/json` | JSON data | Trait metadata |
+| `application/lua` | Lua script | Interactive DOBs |
+| `model/obj` | 3D model | 3D assets |
+
+The `application/lua` type is especially noteworthy. By storing Lua scripts as Spore content, developers can create **Programmable Digital Objects** (DOBs) whose behavior is defined entirely on-chain. A Lua DOB can have rules for how it "levels up," what it displays based on time or other on-chain state, or even interact with other DOBs.
+
+## Creating Spores with Different Content Types
+
+### Text Spore
+
+```typescript
+import { ccc } from "@ckb-ccc/core";
+import { createSpore, bytifyRawString } from "@spore-sdk/core";
+
+const client = new ccc.ClientPublicTestnet();
+const signer = new ccc.SignerCkbPrivateKey(client, privateKey);
+const creatorAddress = await signer.getInternalAddress();
+
+// Create a text Spore
+const { txSkeleton } = await createSpore({
+  data: {
+    contentType: "text/plain",
+    content: new TextEncoder().encode(
+      "This text is stored 100% on-chain in a Spore Digital Object."
+    ),
+  },
+  toLock: (await ccc.Address.fromString(creatorAddress, client)).script,
+  fromInfos: [creatorAddress],
+  config: getSporeConfig("testnet"),
+});
+```
+
+### Image Spore (SVG)
+
+```typescript
+const svgContent = `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <circle cx="50" cy="50" r="40" fill="#3a86ff"/>
+  <text x="50" y="55" text-anchor="middle" fill="white" font-size="14">CKB</text>
+</svg>`;
+
+const { txSkeleton } = await createSpore({
+  data: {
+    contentType: "image/svg+xml",
+    content: new TextEncoder().encode(svgContent),
+  },
+  toLock: creatorLockScript,
+  fromInfos: [creatorAddress],
+  config: getSporeConfig("testnet"),
+});
+```
+
+### JSON Metadata Spore
+
+```typescript
+const metadata = {
+  name: "CKB Genesis Dragon",
+  description: "A legendary dragon from the CKB genesis block",
+  traits: {
+    element: "Lightning",
+    rarity: "Legendary",
+    power: 9000,
+    special: "Immune to DAO lock",
+  },
+};
+
+const { txSkeleton } = await createSpore({
+  data: {
+    contentType: "application/json",
+    content: new TextEncoder().encode(JSON.stringify(metadata, null, 2)),
+  },
+  toLock: creatorLockScript,
+  fromInfos: [creatorAddress],
+  config: getSporeConfig("testnet"),
+});
+```
+
+### Lua Interactive DOB
+
+```typescript
+const luaScript = `
+-- This Lua script defines an interactive DOB
+-- The DOB's displayed properties change based on block number
+
+local block_num = ckb.load_block_number()
+local age = math.floor(block_num / 1000)
+
+return {
+  name = "Growing Crystal",
+  age = age,
+  size = math.min(age * 10, 100),
+  color = (age % 2 == 0) and "#3a86ff" or "#ff6b6b",
+  description = "A crystal that grows with each 1000 blocks on CKB"
+}
+`;
+
+const { txSkeleton } = await createSpore({
+  data: {
+    contentType: "application/lua",
+    content: new TextEncoder().encode(luaScript),
+  },
+  toLock: creatorLockScript,
+  fromInfos: [creatorAddress],
+  config: getSporeConfig("testnet"),
+});
+```
+
+## Spore Clusters: Organizing Collections
+
+A **Cluster** is a separate CKB cell that provides a name and description for a collection of related Spores. Think of it as an on-chain folder or album.
+
+### Cluster Cell Structure
+
+```
+Cluster Cell {
+  capacity:  <CKB locked in shannons>
+  lock:      <creator's lock script>
+  type: {
+    code_hash: <Cluster script code_hash>
+    hash_type: "data1"
+    args:      <32-byte Cluster ID>
+  }
+  data: <Molecule ClusterData {
+    name:        bytes  ← Collection name as UTF-8
+    description: bytes  ← Collection description as UTF-8
+  }>
+}
+```
+
+### Creating a Cluster
+
+```typescript
+import { createCluster } from "@spore-sdk/core";
+
+// Step 1: Create the Cluster cell
+const { txSkeleton: clusterTx, outputIndex } = await createCluster({
+  data: {
+    name: "CKB Learning Series",
+    description: "Educational Digital Objects demonstrating the Spore protocol on CKB.",
+  },
+  toLock: creatorLockScript,
+  fromInfos: [creatorAddress],
+  config: getSporeConfig("testnet"),
+});
+
+// Sign and send the cluster transaction...
+const clusterTxHash = await sendSignedTransaction(clusterTx, signer, client);
+
+// The Cluster ID is in the type script args of the output
+const clusterId = clusterTx.outputs.get(outputIndex).type.args;
+
+// Step 2: Create a Spore linked to the Cluster
+const { txSkeleton: sporeTx } = await createSpore({
+  data: {
+    contentType: "text/plain",
+    content: new TextEncoder().encode("Lesson 14: Hello from Spore!"),
+    clusterId: clusterId,  // Link to our collection
+  },
+  toLock: creatorLockScript,
+  fromInfos: [creatorAddress],
+  config: getSporeConfig("testnet"),
+});
+```
+
+### Cluster Validation Rules
+
+When creating a Spore with a `cluster_id`, the Spore type script requires:
+
+1. The Cluster cell must be referenced in the transaction's cell deps
+2. The Cluster cell's type script args must match the `cluster_id` bytes
+3. The Cluster must be a live cell (not already spent)
+
+This ensures that every Spore's cluster reference is valid and points to a real on-chain collection.
+
+## Melting (Destroying) Spores
+
+"Melting" is Spore's term for destroying a Digital Object and recovering the locked CKB. This is one of Spore's most distinctive economic features.
+
+### How Melting Works
+
+```typescript
+import { meltSpore } from "@spore-sdk/core";
+
+// Melt a Spore -- destroys it and returns the locked CKB
+const { txSkeleton } = await meltSpore({
+  outPoint: {
+    txHash: sporeCreationTxHash,
+    index: "0x0",
+  },
+  fromInfos: [creatorAddress],
+  config: getSporeConfig("testnet"),
+});
+
+// After signing and sending:
+// - The Spore cell is consumed (gone forever)
+// - The CKB that was locked inside is returned to creatorAddress
+// - No new Spore cell is created
+```
+
+### Who Can Melt?
+
+Only the **original creator** of a Spore can melt it. The Spore type script encodes the creator's lock hash at creation time and validates this during melting. Even if the Spore has been transferred to another owner, the creator retains melting rights.
+
+This is enforced on-chain: the melt transaction must include at least one cell with the creator's lock script as an input. Without this, the Spore type script rejects the transaction.
+
+### Melt vs. Burn
+
+| Action | Result | CKB |
+|--------|--------|-----|
+| **Melt** (Spore) | Spore destroyed; content gone | Returned to creator |
+| **Burn** (ERC-721) | Sent to 0x000...0 address | ETH spent on gas; none returned |
+| **Burn** (ERC-20) | Token supply reduced | ETH spent on gas; none returned |
+
+## Spore Economics: Minimum Capacity and Value Preservation
+
+### Capacity Formula
+
+Every Spore must contain enough CKB to cover its size. The minimum capacity calculation:
+
+```
+minimum_capacity_bytes =
+    8   (capacity field size)
+  + 32  (lock script code_hash)
+  + 1   (lock script hash_type)
+  + 20  (lock script args -- pubkey hash for secp256k1-blake160)
+  + 32  (type script code_hash)
+  + 1   (type script hash_type)
+  + 32  (type script args -- spore_id)
+  + 16  (Molecule table header: 4 + 3*4 bytes)
+  + len(content_type)   (MIME type string bytes)
+  + len(content)        (actual content bytes)
+  + len(cluster_id)     (0 or 32 bytes)
+
+minimum_capacity_CKB = minimum_capacity_bytes / 100_000_000
+```
+
+### Capacity Examples
+
+| Content | Content Size | Min CKB Locked |
+|---------|-------------|----------------|
+| "Hello, World!" | 13 bytes | ~192.6 CKB |
+| 1,000-char text | 1,000 bytes | ~202.3 CKB |
+| Small SVG | 500 bytes | ~197.8 CKB |
+| PNG icon (64x64) | ~5,000 bytes | ~242 CKB |
+| PNG image (512x512) | ~100,000 bytes | ~1,192 CKB |
+| JSON metadata | 200 bytes | ~193.7 CKB |
+| Lua DOB script | 2,000 bytes | ~211 CKB |
+
+Larger content requires more CKB to be locked. This creates a direct economic relationship between content value and storage cost. A large, high-quality image requires significantly more locked CKB than a short text message.
+
+### The Floor Value Guarantee
+
+Because the locked CKB is always recoverable by melting, every Spore has a guaranteed minimum value equal to the CKB it contains. As CKB's value changes over time, so does the floor value of every Spore. This is fundamentally different from traditional NFTs whose value is purely speculative.
+
+A collector who holds a Spore can always reason: "Even in the worst case, I can melt this and receive X CKB back. At current CKB prices, that means this Spore is worth at least $Y."
+
+## Step-by-Step Tutorial
+
+Follow these steps to run the Spore exploration script.
+
+### Step 1: Set Up the Project
+
+```bash
+cd lessons/14-spore-nfts
+npm install
+```
+
+This installs `@ckb-ccc/core`, `@spore-sdk/core`, TypeScript, and the tsx runtime.
+
+### Step 2: Fund Your Testnet Account
+
+The demonstration private key is:
+```
+0xd6013cd867d286ef84cc300ac6546013837df2b06c9f53c83b4c33c2417f6a07
+```
+
+Get the corresponding testnet address from the script output, then fund it:
+
+```
+https://faucet.nervos.org/
+```
+
+Creating Spores requires locking CKB. A minimal text Spore needs approximately 150-200 CKB. Aim for at least 300 CKB to create both a Cluster and a Spore.
+
+### Step 3: Run the Script
+
+```bash
+npx tsx src/index.ts
+```
+
+The script will:
+1. Connect to CKB testnet
+2. Check your balance (falls back to demo mode if insufficient)
+3. Explain Spore economics with capacity calculations
+4. Create a Spore Cluster named "CKB Learning Series"
+5. Create a text Spore linked to that Cluster
+6. Query the Spore from the blockchain and decode its content
+7. Explain melting without actually melting the Spore
+8. Display a comparison table and real-world use cases
+
+### Step 4: View Your Spore in the Explorer
+
+After creation, view your Spore on the Nervos explorer:
+
+```
+https://pudge.explorer.nervos.org/transaction/<your-tx-hash>
+```
+
+Or browse the Spore ecosystem demo app:
+
+```
+https://a-simple-demo.spore.pro/
+```
+
+### Step 5: Query Spore Cells Programmatically
+
+```typescript
+import { ccc } from "@ckb-ccc/core";
+
+const client = new ccc.ClientPublicTestnet();
+
+// Search for all Spores (filter by type script code_hash)
+const SPORE_CODE_HASH = "0x685a60219309029d01310311dba953d67029170ca4848a4ff638e57002130a0d";
+
+for await (const cell of client.findCellsByType(
+  { codeHash: SPORE_CODE_HASH, hashType: "data1", args: "0x" },
+  undefined,
+  true
+)) {
+  // cell.cellOutput.type.args = Spore ID
+  // cell.cellOutput.capacity = locked CKB
+  // cell.outputData = Molecule-encoded SporeData
+  console.log("Spore ID:", cell.cellOutput.type?.args);
+  console.log("Locked CKB:", Number(cell.cellOutput.capacity) / 1e8, "CKB");
+}
+```
+
+### Step 6: Decode SporeData
+
+```typescript
+function decodeSporeData(hexData: string): {
+  contentType: string;
+  content: Uint8Array;
+  clusterId: string | null;
+} {
+  const data = hexToBytes(hexData);
+  const view = new DataView(data.buffer);
+
+  const offset0 = view.getUint32(4, true);   // content_type start
+  const offset1 = view.getUint32(8, true);   // content start
+  const offset2 = view.getUint32(12, true);  // cluster_id start
+  const total = view.getUint32(0, true);     // total size
+
+  const contentType = new TextDecoder().decode(data.slice(offset0, offset1));
+  const content = data.slice(offset1, offset2);
+  const clusterId = offset2 < total
+    ? "0x" + Array.from(data.slice(offset2)).map(b => b.toString(16).padStart(2, "0")).join("")
+    : null;
+
+  return { contentType, content, clusterId };
+}
+```
+
+## Comparison Table: Spore vs Ethereum NFTs (ERC-721)
+
+| Feature | Spore (CKB) | ERC-721 (Ethereum) |
+|---------|-------------|---------------------|
+| **Content storage** | 100% on-chain (cell data) | Usually IPFS or HTTP URL |
+| **Content permanence** | Permanent (on-chain forever) | At risk if IPFS/server fails |
+| **Content mutability** | Immutable by protocol | Mutable if metadata URL changes |
+| **Floor value** | Locked CKB (always recoverable) | None -- pure market speculation |
+| **Receive without funds** | Yes (cell is self-funded) | No (recipient needs ETH for gas) |
+| **Destroying** | Melt: receive locked CKB back | Burn: value gone forever |
+| **Creation cost** | CKB locked (not spent) | Gas paid + IPFS hosting fees |
+| **Storage cost** | Amortized (CKB locked) | Ongoing IPFS pinning fees |
+| **Content types** | Any MIME type | Typically just metadata JSON |
+| **Interactive content** | Lua scripting support | Not natively supported |
+| **Collections** | Clusters (on-chain cells) | Contract-level groupings |
+| **Verification** | On-chain script validates rules | Off-chain hash verification |
+| **Interoperability** | CKB cell composability | OpenSea, standard marketplaces |
+| **VM execution** | CKB-VM (RISC-V, deterministic) | EVM (Ethereum Virtual Machine) |
+
+## Real-World Uses
+
+### .bit Domain Names
+
+.bit (formerly DAS) implements its domain name system as Spore Digital Objects on CKB. Each .bit domain (e.g., `alice.bit`) is a Spore cell. The domain's resolution records are stored as JSON content in the cell data. Transferring a domain means transferring the Spore cell to a new owner's lock script.
+
+Because the domain is a Spore, it has:
+- Guaranteed on-chain existence (no server needed)
+- Intrinsic value (CKB locked inside)
+- Standard transfer mechanics (like any CKB cell)
+
+### Gaming Assets on CKB
+
+Game developers can create in-game items as Spore cells with `application/json` content storing the item's stats:
+
+```json
+{
+  "name": "Excalibur",
+  "type": "sword",
+  "damage": 150,
+  "magic": 50,
+  "special": "Critical Strike: 25% chance to deal double damage",
+  "rarity": "legendary"
+}
+```
+
+Players trading items are performing Spore transfers. Items have floor values (the locked CKB). A legendary sword's floor value is higher because it requires more CKB to be locked (to accommodate its richer JSON metadata).
+
+### Digital Art Certification
+
+Artists can create Spores where the content is the actual artwork (SVG, PNG), not a link to it. This creates provably authentic, permanently on-chain digital art. A certificate of authenticity is implicit: the artwork is the Spore, and the Spore's creation transaction is signed by the artist's key.
+
+### Programmable Digital Objects
+
+The `application/lua` content type enables truly programmable on-chain objects. A Lua DOB can express rules like "this object changes its appearance based on how many CKB the holder has staked in the Nervos DAO" or "this creature evolves after 1,000 blocks." The entire logic is stored on-chain in the Spore's content field.
+
+## Summary
+
+The Spore protocol represents a significant evolution in how we think about digital ownership on blockchains:
+
+- **Digital Objects are real cells**: A Spore is a first-class CKB cell, not a record in a database. It has weight, it occupies space, and it carries real economic value.
+
+- **Intrinsic value is fundamental**: By locking CKB tokens inside every Spore, the protocol guarantees that Digital Objects always have a minimum floor value. Melting recovers this value.
+
+- **On-chain storage is non-negotiable**: All Spore content lives in cell data. This is not optional or configurable -- it is the protocol's core commitment to permanence and verifiability.
+
+- **Clusters organize collections**: Cluster cells provide on-chain, human-readable names and descriptions for groupings of related Spores, enabling collection-level organization without sacrificing decentralization.
+
+- **MIME content types enable diversity**: By using standard MIME types, Spore can represent text, images, audio, video, structured data, and even interactive programs. The content type tells applications how to render or interpret the Spore's content.
+
+- **Melting is recovery, not burning**: Destroying a Spore is a reversible economic decision. The creator can always recover the locked CKB, which is fundamentally different from burning in traditional NFT standards.
+
+- **Molecule encoding is CKB-native**: SporeData uses CKB's standard binary serialization format, making it compatible with the broader CKB tooling and script ecosystem.
+
+## What's Next
+
+Lesson 15 covers **Omnilock**, CKB's universal lock script that enables signing CKB transactions with wallets from other blockchains. With Omnilock, an Ethereum user can control CKB cells using their MetaMask wallet, and a Bitcoin user can sign with their native Bitcoin wallet -- without any bridges or wrapped assets.

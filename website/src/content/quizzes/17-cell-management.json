@@ -1,0 +1,101 @@
+{
+  "lessonId": 17,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What is the minimum capacity required for a plain CKB cell with a standard secp256k1-blake160 lock and no data?",
+      "options": [
+        "1 CKB — any positive value is valid",
+        "10 CKB — the standard minimum imposed by the protocol",
+        "61 CKB — because the cell occupies 61 bytes (8 capacity + 32 code_hash + 1 hash_type + 20 args) and 1 byte = 1 CKB minimum",
+        "100 CKB — set by the genesis block configuration"
+      ],
+      "correctAnswer": 2,
+      "explanation": "A cell's capacity must be at least as large as the bytes it occupies. A plain cell with a secp256k1-blake160 lock uses 8 bytes (capacity field) + 32 bytes (lock code_hash) + 1 byte (lock hash_type) + 20 bytes (lock args) = 61 bytes. Since 1 byte of occupied space requires 1 CKB of capacity, the minimum is 61 CKB. Adding a type script or data increases this minimum proportionally."
+    },
+    {
+      "id": 2,
+      "question": "What is cell fragmentation and what causes it in CKB?",
+      "options": [
+        "Fragmentation occurs when a cell's data field contains incompatible binary formats",
+        "Fragmentation is when many small cells accumulate instead of few large ones — caused by receiving many payments (each creates a new cell), change cells from transactions, token airdrops, and dApp interactions",
+        "Fragmentation happens when a cell's lock script and type script have different hash_types",
+        "Fragmentation refers to cells scattered across different shard chains that cannot be spent together"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Cell fragmentation is the accumulation of many small cells rather than fewer large ones — directly analogous to UTXO fragmentation in Bitcoin. Every incoming payment creates a new cell, every transaction creates a change cell, and every dApp interaction may create additional cells. The result is that a wallet with significant activity can end up with hundreds of cells, leading to larger transactions (more inputs), higher fees, and slower balance queries."
+    },
+    {
+      "id": 3,
+      "question": "What is the maximum practical number of inputs per consolidation transaction, and why?",
+      "options": [
+        "Exactly 10 inputs — CKB's consensus limits transactions to 10 cells",
+        "Unlimited — there is no size constraint on CKB transactions",
+        "100-200 inputs per transaction, because CKB transactions have a maximum serialized size (~512 KB) and each input adds ~44 bytes",
+        "1000 inputs — constrained only by the transaction fee"
+      ],
+      "correctAnswer": 2,
+      "explanation": "CKB transactions have a maximum serialized size limit of approximately 512 KB. Each input occupies approximately 44 bytes in the serialized transaction format (32-byte outpoint + 8-byte since field + overhead). This limits practical consolidations to 100-200 inputs per transaction. For larger consolidations, multiple rounds are needed: batch into groups of 100-200, then consolidate the intermediate outputs."
+    },
+    {
+      "id": 4,
+      "question": "How does cell splitting enable parallel transaction submission in CKB, and why is this impossible in Ethereum?",
+      "options": [
+        "Cell splitting enables parallelism because CKB validators process multiple shards simultaneously",
+        "CKB's UTXO model allows two transactions to be submitted simultaneously if they spend different cells — no conflict. Ethereum's account model requires sequential nonces, serializing all transactions from one address",
+        "Cell splitting works because CKB uses a different consensus algorithm than Ethereum",
+        "Parallelism in CKB requires a special 'parallel' flag in the transaction header"
+      ],
+      "correctAnswer": 1,
+      "explanation": "In CKB's UTXO/cell model, a transaction conflict only occurs if two transactions try to spend the same cell. By splitting a large cell into 5 smaller ones, you can submit 5 transactions simultaneously — each spending a different cell. There is no nonce system. In Ethereum, every transaction from an account increments a sequential nonce. Transaction N+1 cannot be mined before transaction N, forcing serialization. CKB's model is fundamentally more parallelism-friendly for high-throughput applications."
+    },
+    {
+      "id": 5,
+      "question": "What is a 'dust cell' in CKB and what is the most efficient strategy to clean them up?",
+      "options": [
+        "Dust cells are cells with invalid script configurations; they should be deleted via a governance proposal",
+        "A dust cell is one at or below minimum capacity (61 CKB for plain cells), with no excess value. The most efficient cleanup is to include many dust cells as inputs alongside a larger input in regular transactions — the larger input covers fees, and the dust capacity is recovered as change",
+        "Dust cells are cells older than 1000 blocks; they automatically expire and return CKB to the owner",
+        "Dust cells are cleaned up automatically by CKB validators during block processing"
+      ],
+      "correctAnswer": 1,
+      "explanation": "A dust cell holds capacity at or near the minimum — all its CKB is consumed by the structural cost of the cell itself, with little or no spendable excess. They can't be deleted or abandoned — you must spend them to recover the capacity. The efficient approach is batch sweeping: include 20-50 dust cells as inputs alongside one large input cell. The large cell covers the transaction fee, and all the dust capacity flows back to you as part of the change output."
+    },
+    {
+      "id": 6,
+      "question": "When selecting cells for a transaction, what is the key advantage of the 'smallest first' strategy over 'largest first'?",
+      "options": [
+        "'Smallest first' always results in lower transaction fees than 'largest first'",
+        "'Smallest first' preferentially uses up small cells, reducing fragmentation over time. 'Largest first' minimizes the number of inputs (lower fees) but leaves small cells untouched, allowing fragmentation to grow",
+        "'Smallest first' is faster to compute because sorted arrays are more efficient",
+        "'Smallest first' is required by the CKB consensus rules for fee calculation"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The 'smallest first' strategy picks the smallest available cells until the target capacity is reached. This deliberately consumes small cells, preventing fragmentation from accumulating over time. The tradeoff is that it typically requires more inputs per transaction (higher fee). 'Largest first' does the opposite: fewer inputs (lower fees) but leaves small cells in the pool indefinitely. Production wallets often use a hybrid: 'largest first' for normal transactions, 'smallest first' for periodic consolidation passes."
+    },
+    {
+      "id": 7,
+      "question": "Why should plain CKB cells never be mixed with xUDT token cells in a consolidation transaction?",
+      "options": [
+        "Plain CKB cells and xUDT cells have different serialization formats that cannot coexist in one transaction",
+        "Including xUDT cells triggers the xUDT type script, which enforces token conservation rules. A 'consolidation' that includes xUDT cells must ensure token inputs equal token outputs — adding complexity and potential for rejection",
+        "Mixing cell types is forbidden by CKB consensus rules and will cause the transaction to be immediately rejected",
+        "Plain CKB cells cannot be included in the same script group as xUDT cells"
+      ],
+      "correctAnswer": 1,
+      "explanation": "When an xUDT token cell is included as an input (or output), the xUDT type script runs and validates that the total token amount in inputs equals the total in outputs. A transaction designed purely to consolidate CKB capacity might accidentally 'burn' tokens or create an imbalanced token flow, causing the type script to reject the transaction. Best practice: consolidate plain CKB cells in separate transactions from typed cells, and consolidate each token type separately."
+    },
+    {
+      "id": 8,
+      "question": "A dApp needs to submit 50 transactions per block. How should it structure its cell inventory to support this throughput?",
+      "options": [
+        "Hold one giant cell with all the CKB and split it before every transaction batch",
+        "Maintain an operational pool of at least 50 medium-sized cells, each sized to cover one transaction's fee. Use a separate key for protocol state cells to prevent them from being selected as fee payers. Replenish the pool from treasury after each block.",
+        "Use Ethereum-style nonce management to serialize all 50 transactions",
+        "Submit all 50 transactions as a single bundled 'batch transaction' to avoid cell management"
+      ],
+      "correctAnswer": 1,
+      "explanation": "A dApp processing 50 transactions per block needs 50 independent cells available simultaneously — one per transaction, so all 50 can be submitted in parallel (since they spend different cells). The operational pool should be refilled after each block. Protocol state cells (global config, pool reserves) must be kept in a separate key/namespace to prevent the cell selector from accidentally spending them as fee inputs. Splitting a single large cell before every batch would double the latency (split tx + operation tx = 2 tx instead of 1)."
+    }
+  ]
+}

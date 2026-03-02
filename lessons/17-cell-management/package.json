@@ -1,0 +1,21 @@
+{
+  "name": "17-cell-management",
+  "version": "1.0.0",
+  "description": "Lesson 17: Advanced Cell Management - Consolidation, Splitting, and Optimization",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@ckb-ccc/core": "^0.1.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

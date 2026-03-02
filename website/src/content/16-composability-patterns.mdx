@@ -1,0 +1,346 @@
+# CKB Composability Patterns
+
+## Overview
+
+In Ethereum, composability means one smart contract calling another. You build DeFi protocols by chaining function calls: Aave calls Uniswap calls Chainlink. Re-entrancy attacks are possible. Upgradeable contracts can silently change behavior for existing integrations. Composability requires explicit interface design.
+
+CKB's composability model is different at a fundamental level: **there are no cross-script calls**. Scripts cannot invoke each other. Instead, composability is achieved by combining multiple independent scripts in a single transaction — each script validates the same transaction, and the transaction is valid only when every script agrees.
+
+This model has profound implications for security, permissionlessness, and protocol design.
+
+## The Transaction-Level Composition Model
+
+In CKB, a transaction proposes a complete state transition: a set of inputs (cells to consume) and outputs (cells to create). Every relevant script runs against this proposed state:
+
+```
+Transaction:
+  inputs:  [Cell A, Cell B, Cell C]
+  outputs: [Cell D, Cell E]
+
+Scripts that run (one instance per unique script identity):
+  Lock(A): "Does the spender have rights to A?" -> 0 or error
+  Lock(B): "Does the spender have rights to B?" -> 0 or error
+  Type(A): "Is the state transition for A valid?" -> 0 or error
+  Type(D): "Is the new cell D valid?" -> 0 or error
+
+Transaction is valid if and only if ALL scripts return 0.
+```
+
+This is a logical AND over all validators. The invariants of every protocol involved must be satisfied simultaneously. No script can "allow" a transaction that violates another script's rules.
+
+## Open Protocols: Building Without Permission
+
+A script deployed on CKB with `hash_type: "data"` has a code_hash equal to `blake2b(binary)`. This hash is the script's permanent, public identity. Anyone who knows this hash can:
+
+1. Reference the script in a cell dep (making the binary available to the VM)
+2. Create cells that use this script as their lock or type
+3. Build protocols that compose with this script
+
+No permission is needed. No API key. No registration. No payment to the script authors.
+
+This is what "open protocol" means on CKB: once deployed, a script is a public good that the entire ecosystem can build on forever.
+
+### Key Open Protocols on CKB
+
+| Protocol | Code Hash Type | What Builders Get |
+|----------|---------------|-------------------|
+| xUDT | `data1` | Standard token accounting — conservation, supply limits |
+| Spore | `type` | Immutable NFTs with on-chain content |
+| Omnilock | `type` | Multi-mode authentication (ETH, BTC, multisig, passkeys) |
+| Nervos DAO | `type` | Trustless CKB staking with block subsidy |
+| secp256k1-blake160 | `data1` | Standard CKB key verification |
+
+Any developer can write a smart contract that interacts with these protocols without asking for integration support.
+
+## Pattern 1: Scripts Referencing Other Scripts via Cell Deps
+
+The most fundamental composability pattern is using another script's identity as a parameter. This allows one script to be configured for any number of "partner" protocols.
+
+### Example: Token-Gated Content Access
+
+Consider a content cell that should only be accessible to holders of a specific token:
+
+```
+Content cell:
+  lock: {standard secp256k1 — content provider's key}
+  type: {gate_script, args: 0x<xUDT_type_hash>}
+  data: <encrypted content>
+```
+
+The gate type script's `args` contains the blake2b-256 hash of the required xUDT type script. At runtime, the gate script:
+
+1. Reads its own args: `required_token_type_hash = args[0..32]`
+2. Scans all input cells for one whose `type_script_hash == required_token_type_hash`
+3. If found: return 0 (success — token holder is accessing the content)
+4. If not found: return error (deny access)
+
+The gate script never calls xUDT. It does not need to. It simply checks whether a cell with the right type script exists in the transaction. This is pure data inspection.
+
+The same gate script binary works for **any token** — just change the args to point to a different token's type hash. One deployment, infinite configurations.
+
+### Cell Dep Usage
+
+The transaction that accesses the content includes:
+
+```
+cell_deps:
+  [0] Gate script code cell (provides the gate binary to CKB-VM)
+  [1] xUDT code cell (provides the xUDT binary to CKB-VM)
+  [2] Omnilock code cell (provides the lock binary to CKB-VM)
+```
+
+Scripts find their code via cell deps. Scripts can also *read* cell dep data (inspecting other scripts' code or configuration), enabling even more advanced patterns.
+
+## Pattern 2: Multi-Script Transactions
+
+### Anatomy of a Token Transfer Transaction
+
+Even a "simple" token transfer involves multiple scripts:
+
+```
+Transaction: Alice sends 100 USDC to Bob
+
+Inputs:
+  Cell 1: Alice's USDC (lock: Alice's Omnilock, type: xUDT/USDC, data: 500 USDC)
+  Cell 2: Alice's CKB  (lock: Alice's Omnilock, no type)
+
+Outputs:
+  Cell 3: Bob's USDC   (lock: Bob's Omnilock, type: xUDT/USDC, data: 100 USDC)
+  Cell 4: Alice's USDC (lock: Alice's Omnilock, type: xUDT/USDC, data: 400 USDC)
+  Cell 5: Alice's CKB  (lock: Alice's Omnilock, no type, capacity = change)
+
+Scripts that run:
+  Alice's Omnilock: "Is Alice's signature in the witness?" -> pass
+  xUDT type script: "Does 100+400 USDC out == 500 USDC in?" -> pass
+```
+
+Two independent validators. Alice's Omnilock does not know about xUDT. xUDT does not know about Omnilock. They validate the same transaction, each checking only what they care about.
+
+### The AND Semantics Guarantee
+
+Because all scripts must pass, you cannot have a transaction that satisfies one protocol's rules while violating another's. This gives CKB composition a strong safety property:
+
+- If you add a new script to a transaction, it cannot bypass existing script rules
+- Existing scripts are not affected by the presence of new scripts
+- A protocol can guarantee its invariants hold regardless of what else is in the transaction
+
+## Pattern 3: Atomic Swaps
+
+An atomic swap is an exchange of two assets that either fully succeeds or fully fails. CKB transactions are atomic by design — they succeed or fail as a unit. This makes on-chain swaps natural.
+
+### Direct Peer-to-Peer Swap
+
+Alice wants to exchange 100 USDC for 1 BTC-on-CKB with Bob. Both must sign the same transaction:
+
+```
+Transaction (signed by BOTH Alice and Bob):
+
+Inputs:
+  Cell A: Alice's 100 USDC (lock: Alice, type: xUDT/USDC)
+  Cell B: Bob's 1 BTC-CKB  (lock: Bob,   type: xUDT/BTC)
+
+Outputs:
+  Cell C: Bob's 100 USDC   (lock: Bob,   type: xUDT/USDC)
+  Cell D: Alice's 1 BTC-CKB (lock: Alice, type: xUDT/BTC)
+
+Scripts:
+  Alice's lock: verifies Alice's signature
+  Bob's lock:   verifies Bob's signature
+  USDC type:    verifies 100 USDC in == 100 USDC out
+  BTC type:     verifies 1 BTC in == 1 BTC out
+```
+
+This transaction can only be submitted if both Alice and Bob have signed it. Both agreed on the exact outputs. If Alice tries to change her output after Bob signs, his signature becomes invalid.
+
+### On-Chain Limit Orders
+
+A more sophisticated pattern allows partial fills without both parties being online simultaneously:
+
+1. Alice creates an **offer cell** on-chain:
+   ```
+   Offer cell:
+     lock: {offer_lock, args: Alice's pubkey + expected_return}
+     type: xUDT/USDC
+     data: 100 USDC
+   ```
+2. The offer_lock script allows ANYONE to spend the cell, provided:
+   - The spender provides at least the expected amount of the target token to Alice
+   - Or Alice signs to cancel the offer
+3. Bob (or anyone) fills the offer in a single transaction
+4. No coordination required — Bob just builds the transaction
+
+This is the foundation of on-chain limit order books and DEX protocols on CKB.
+
+### Hash Time Lock Contracts (HTLCs)
+
+For cross-chain atomic swaps (e.g., CKB to Bitcoin), HTLCs provide atomicity across two separate chains:
+
+```
+Step 1: Alice locks USDC on CKB:
+  "Bob can claim this if he reveals preimage(H)
+   If 48 hours pass, Alice can reclaim it"
+
+Step 2: Bob locks BTC on Bitcoin:
+  "Alice can claim this if she reveals preimage(H)
+   If 24 hours pass, Bob can reclaim it"
+
+Step 3: Alice reveals preimage on CKB -> claims her BTC
+Step 4: Bob sees the preimage on-chain -> reveals it on Bitcoin -> claims USDC
+```
+
+Both swaps succeed atomically (assuming Bob acts before his timeout). If either party fails to act, timeouts return funds to their owners.
+
+## Pattern 4: First-Class Assets Enable Composability
+
+In Ethereum, tokens are accounting entries inside contract storage. The ERC-20 standard is a function-call interface: `transfer()`, `approve()`, `allowance()`.
+
+In CKB, tokens are cells — the same primitive as any other asset. A token cell is a live cell with an xUDT type script and an amount in its data field. This means:
+
+- Token cells can have ANY lock script (not just the token contract's storage)
+- Token cells can be included in any transaction alongside any other cells
+- Scripts can read token cells the same way they read CKB cells
+- No `approve()` / `transferFrom()` dance needed for DeFi composability
+- Tokens are first-class assets, not second-class entries in a mapping
+
+This is what "first-class assets" means: tokens exist as real objects in the UTXO set, not as database rows. Any protocol can inspect, reference, and compose with them naturally.
+
+## Pattern 5: Building on Top Without Permission
+
+### Extending xUDT Tokens
+
+xUDT supports "owner mode" — when the cell's type args include a valid owner lock hash, the owner can bypass conservation rules (for minting/burning). But the xUDT binary itself is open. You can:
+
+- **Create a staking contract**: Accept any xUDT token as input, issue receipt tokens, return staked tokens after a lock period
+- **Create a bridge**: Lock xUDT tokens on CKB, mint mirrored tokens on another chain (verified by a relay)
+- **Create a DEX**: Accept pairs of xUDT tokens, enforce a pricing invariant, update reserves
+
+None of these require changes to the xUDT binary or permission from the xUDT team.
+
+### Extending Spore NFTs
+
+Spore NFTs have immutable content (data cannot be changed after minting). But you can extend them by creating linked cells:
+
+```
+NFT Rental Cell:
+  lock: {rental_lock, args: renter's key + expiry}
+  type: {rental_type, args: spore_nft_outpoint}
+  data: rental_price + duration
+```
+
+The rental type script validates the rental lifecycle. The Spore NFT itself remains unchanged. This is extension by reference, not by modification.
+
+## Comparing CKB and Solidity Composability
+
+| Property | CKB | Solidity |
+|----------|-----|----------|
+| Composition mechanism | Multiple scripts in same transaction | Cross-contract CALL/DELEGATECALL |
+| Re-entrancy | Impossible — no calls, no state mutation during execution | Requires guard patterns (ReentrancyGuard) |
+| Mutable state during execution | None — state is proposed, not modified | Yes — storage changes during execution |
+| Permission required | None — code_hash is public | Owner can add access modifiers |
+| Binary immutability | `hash_type: data` guarantees exact binary | Upgradeability proxy can silently change behavior |
+| Parallel execution | Scripts run in parallel (logically) | Sequential execution in a single VM |
+| Audit surface | Per-script (bounded input/output) | Per call-path (combinatorial explosion) |
+
+The absence of cross-script calls eliminates an entire class of attack vectors (re-entrancy, delegate call abuse, callback manipulation). The tradeoff is that CKB protocols require more careful cell data design — the "interface" is raw bytes, not a named function.
+
+## Designing Composable CKB Protocols
+
+### Step 1: Model Your Cells
+
+Before writing any script, design the cell types:
+
+```
+What cells exist?
+What data does each contain?
+What lock and type scripts govern each?
+How do cells transition between states?
+```
+
+### Step 2: Identify Reusable Primitives
+
+Can you use existing open protocols?
+- Need fungible tokens? Use xUDT
+- Need NFTs? Use Spore
+- Need multi-wallet auth? Use Omnilock
+- Need trustless staking? Use Nervos DAO
+
+Write new scripts only for logic that existing protocols don't cover.
+
+### Step 3: Design Script Invariants
+
+Each script should enforce exactly one set of invariants:
+- **Lock scripts**: "Who is authorized to spend this cell?"
+- **Type scripts**: "What state transitions are valid?"
+
+Avoid combining multiple unrelated rules in one script. Smaller, focused scripts are easier to audit and more composable.
+
+### Step 4: Think in Transactions
+
+Design your protocol's "moves" as transaction templates. For each operation:
+- What inputs are consumed?
+- What outputs are created?
+- Which scripts will run?
+- What must each script validate?
+
+## Tutorial
+
+### Step 1: Setup
+
+```bash
+cd lessons/16-composability-patterns
+npm install
+```
+
+### Step 2: Run the Demo
+
+```bash
+npm start
+```
+
+The CLI walks through all composability patterns with detailed console output including transaction diagrams, script execution flow, and comparison tables.
+
+### Step 3: Key Functions to Study
+
+```typescript
+demonstrateScriptReferences()
+// Shows how scripts reference each other via cell deps
+
+demonstrateTokenGatedAccess()
+// Token-gated access: xUDT + gate script composition
+
+demonstrateMultiScriptTransaction()
+// Multiple scripts running on the same transaction
+
+demonstrateAtomicSwap()
+// P2P swap and limit order patterns
+
+demonstrateOpenProtocols()
+// Permission-free building on deployed protocols
+
+compareWithSolidity()
+// Side-by-side comparison with Ethereum's model
+```
+
+### Step 4: Design Exercise
+
+Design a voting protocol using composable primitives:
+- Governance tokens (xUDT) represent voting power
+- Proposal cells hold the vote tally
+- A vote type script validates: voter holds tokens, proposal is active, tally is updated
+- What existing protocols can you reuse? What new scripts do you need?
+
+## Summary
+
+CKB composability is fundamentally about combining independent validators in a single transaction. This model:
+
+- Eliminates re-entrancy attacks (no cross-script calls)
+- Enables permissionless building (open protocols via code_hash)
+- Creates a strong AND-guarantee (all invariants must hold simultaneously)
+- Keeps audit scope bounded (each script has a clear, fixed responsibility)
+- Makes first-class assets naturally composable (cells are universal containers)
+
+The patterns covered — script-as-parameter, token-gating, atomic swaps, and open protocol extension — are the building blocks of the CKB dApp ecosystem.
+
+## What's Next
+
+In Lesson 17, you will explore **Advanced Cell Management** — the operational side of the CKB UTXO model. You will learn how cells fragment over time, strategies for consolidation and splitting, optimal capacity planning, and the patterns wallets and dApps use to manage large cell sets efficiently.

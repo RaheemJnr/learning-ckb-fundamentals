@@ -1,0 +1,16 @@
+{
+  "name": "14-spore-nfts",
+  "version": "1.0.0",
+  "description": "Lesson 14: Digital Objects with Spore - create, query, and understand Spore NFTs with intrinsic on-chain value",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "npx tsx src/index.ts",
+    "dev": "npx tsx --watch src/index.ts"
+  },
+  "dependencies": {
+    "@ckb-ccc/core": "latest",
+    "@spore-sdk/core": "latest",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
