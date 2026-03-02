@@ -29,6 +29,7 @@ import {
   getPreviousLesson,
   getLessonQuiz,
 } from "@/lib/content/loader";
+import { LessonProgressControls } from "@/components/lesson-progress-controls";
 
 // Custom MDX components
 const mdxComponents = {
@@ -181,6 +182,11 @@ export default async function LessonPage({
           {lesson.description}
         </p>
       </header>
+
+      {/* Progress controls (client component - only shows when wallet connected) */}
+      <div className="mb-6">
+        <LessonProgressControls lessonId={lesson.id} />
+      </div>
 
       {/* MDX Content */}
       {lesson.content ? (
