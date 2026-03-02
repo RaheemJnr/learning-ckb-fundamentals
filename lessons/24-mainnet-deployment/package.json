@@ -1,0 +1,22 @@
+{
+  "name": "24-mainnet-deployment",
+  "version": "1.0.0",
+  "description": "Lesson 24: Mainnet Deployment and Security - pre-deployment checklist, script verification, and monitoring",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "checklist": "tsx src/security-checklist.ts"
+  },
+  "dependencies": {
+    "@ckb-ccc/core": "^0.1.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

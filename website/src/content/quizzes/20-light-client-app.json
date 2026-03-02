@@ -1,0 +1,101 @@
+{
+  "lessonId": 20,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What is the primary innovation of CKB's FlyClient-based light client compared to traditional SPV (Simplified Payment Verification)?",
+      "options": [
+        "It downloads every block header but compresses them to save space",
+        "It downloads O(log n) randomly sampled headers instead of all O(n) headers, using MMR commitments to verify total proof-of-work",
+        "It relies entirely on trusted full node peers and downloads nothing",
+        "It downloads all transaction data but skips script validation"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Traditional SPV (like Bitcoin's original design) downloads all block headers from genesis — O(n) headers. For CKB this would be ~2.8 GB. FlyClient's key innovation is that you only need to sample O(log n) headers at logarithmically spaced positions. Each sampled header includes an MMR (Merkle Mountain Range) root that commits to the difficulty of all previous headers. By verifying these MMR commitments form a consistent chain, the light client achieves high-confidence proof-of-work verification without downloading everything. With 14 million blocks, FlyClient needs only ~37 headers instead of 14 million."
+    },
+    {
+      "id": 2,
+      "question": "Why does CKB's NC-Max consensus make light client development more efficient compared to using standard Nakamoto Consensus?",
+      "options": [
+        "NC-Max blocks are smaller, so headers are smaller and faster to download",
+        "NC-Max does not use proof-of-work, so there is no need to verify block difficulty",
+        "NC-Max adjusts difficulty every epoch (~4 hours) and natively embeds MMR roots in headers, providing smoother difficulty curves and built-in light client support",
+        "NC-Max allows light clients to skip signature verification entirely"
+      ],
+      "correctAnswer": 2,
+      "explanation": "NC-Max improves on Nakamoto Consensus in ways that directly benefit light clients. Bitcoin adjusts difficulty every 2016 blocks (~2 weeks), creating large variance in difficulty. NC-Max adjusts every epoch (~4 hours), producing a smoother difficulty curve that makes MMR commitments more accurate. More importantly, NC-Max bakes the MMR root directly into the block header format as a native field — not a soft-fork addition. Uncle blocks are also properly accounted for in difficulty calculations, making the total proof-of-work verifiable without downloading every block. These design choices mean the FlyClient protocol works cleanly with CKB from genesis."
+    },
+    {
+      "id": 3,
+      "question": "What is the approximate storage difference between running a CKB pruned full node versus running a CKB light client?",
+      "options": [
+        "Full node: ~1 GB, Light client: ~100 MB (10x difference)",
+        "Full node: ~10 GB, Light client: ~1 GB (10x difference)",
+        "Full node: ~100 GB, Light client: < 1 MB (>100,000x difference)",
+        "Full node: ~100 GB, Light client: ~10 GB (10x difference)"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The storage difference is enormous, not incremental. A pruned CKB full node (which validates everything but prunes spent cells) requires 100+ GB. A CKB light client requires less than 1 MB — storing only a small number of sampled block headers (~37 for a 14-million-block chain) plus a local index of cells for the specific scripts you registered. This 100,000x+ reduction is what makes light clients viable on mobile phones, browser extensions, and IoT devices where running a full node would be completely impractical."
+    },
+    {
+      "id": 4,
+      "question": "What is the purpose of the `set_scripts` RPC method on the CKB light client, and why is it required before calling `get_cells`?",
+      "options": [
+        "It sets the security parameters for the FlyClient sampling algorithm",
+        "It tells the light client which lock/type scripts to watch and index, because the light client only downloads cell data for pre-registered scripts and cannot answer arbitrary queries",
+        "It uploads custom script bytecode to the light client for local execution",
+        "It configures which full node peers the light client connects to"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Unlike a full node that has an index of ALL cells and can answer any query immediately, the light client only indexes cells for scripts you explicitly register. This is fundamental to how light clients achieve their tiny storage footprint — they don't download all cell data, only the data for scripts you declared you care about. When you call set_scripts with a lock script, the light client asks its full node peers for cells matching that script, requests Merkle proofs, verifies them against sampled headers, and builds a local index. Only after this sync completes can get_cells return results. If you haven't called set_scripts first, get_cells returns empty — not an error, just no data."
+    },
+    {
+      "id": 5,
+      "question": "Which of the following operations is NOT supported by a CKB light client?",
+      "options": [
+        "Sending a transaction to the network",
+        "Querying live cells for a registered lock script",
+        "Getting the current tip block header",
+        "Fetching the complete historical transaction list for an address since genesis"
+      ],
+      "correctAnswer": 3,
+      "explanation": "A complete historical transaction list requires access to every block from genesis — exactly what a full node stores and a light client does not. The light client only has sampled headers and a cell index for registered scripts starting from the block_number specified in set_scripts. If you registered a script from block 10,000,000 onwards, you will not see transactions that occurred before that block. For complete transaction history, you need a full node or a dedicated indexer service. In contrast, sending transactions (the light client broadcasts to peers), querying live cells (for registered scripts), and getting the current tip header are all core light client capabilities."
+    },
+    {
+      "id": 6,
+      "question": "How does a light client verify that a cell actually exists in the real CKB blockchain, rather than trusting the full node peer that provided the data?",
+      "options": [
+        "It re-executes the transaction's scripts locally in CKB-VM to confirm validity",
+        "It contacts multiple full nodes and accepts the answer if a majority agree",
+        "It verifies a Merkle proof that the cell's transaction is included in a block whose header was verified during FlyClient sampling — making the verification locally trustless",
+        "It checks the cell's lock script signature against a trusted public key"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Merkle proofs are the cryptographic mechanism that makes light clients trustless. When a full node returns a cell, it also provides a Merkle proof — a sequence of sibling hashes that trace a path from the cell's transaction hash up to the transactions_root in the block header. The light client hashes the transaction, then walks up the Merkle tree using the proof's sibling hashes, and verifies the final result equals the transactions_root embedded in the block header. That block header was verified during FlyClient sampling as part of the legitimate proof-of-work chain. If both the Merkle proof and the FlyClient header verification are valid, the cell provably exists — the light client did not have to trust the full node."
+    },
+    {
+      "id": 7,
+      "question": "A developer is building a CKB mobile wallet. They generate a new address for the user, then call `set_scripts` with `block_number: '0x0'`. What is the tradeoff of this choice compared to using the current block number?",
+      "options": [
+        "Using block 0 is more secure; using the current block risks missing some cells",
+        "Using block 0 means the light client syncs from genesis, which is slow but finds all historical cells; using the current block is fast but only finds cells created after that point",
+        "There is no difference — the light client always syncs from genesis regardless of block_number",
+        "Using block 0 only works on mainnet; testnet requires the current block number"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The block_number in set_scripts tells the light client where to start looking for cells matching that script. Setting block_number to 0x0 (genesis) means the light client scans the entire chain history for your script — it will find all cells ever created with that lock, including very old ones. This is thorough but slow. For a brand-new wallet address that was just generated, there can be no history before this moment, so setting block_number to the current tip is perfectly safe and much faster. The light client only needs to watch for new cells going forward. The right choice depends on whether the address has history: new address → current block, imported/recovered address → genesis or known creation block."
+    },
+    {
+      "id": 8,
+      "question": "Which of the following is the most accurate description of the real-world use cases where light clients excel over full nodes?",
+      "options": [
+        "Light clients are better for everything — there is no reason to run a full node",
+        "Light clients are only useful in academic research; production wallets always use full nodes",
+        "Light clients excel for end-user applications (mobile wallets, browser extensions, dApps) where trustless access to personal cells is needed but full chain history is not; full nodes are needed for infrastructure serving historical data to others",
+        "Light clients are useful only for sending transactions, not for reading blockchain state"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Light clients and full nodes serve different roles in the ecosystem. Light clients excel at exactly what end users need: check my balance, verify a cell exists, send a transaction. These operations require only the current chain state plus Merkle proofs — no historical data. A mobile wallet user does not need to know every transaction that ever happened on CKB; they just need to know which cells they currently own. Full nodes, on the other hand, are essential infrastructure: block explorers need complete history, analytics services need every transaction, DeFi backends may need to serve arbitrary historical queries, and miners must fully validate. Both have their place. The mistake would be running a full node on a phone (impossible) or using a light client for a block explorer (missing 99.99% of the data needed)."
+    }
+  ]
+}

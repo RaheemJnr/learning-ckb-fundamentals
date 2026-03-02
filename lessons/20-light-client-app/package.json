@@ -1,0 +1,21 @@
+{
+  "name": "20-light-client-app",
+  "version": "1.0.0",
+  "description": "Lesson 20: Light Client Development on CKB",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@ckb-ccc/core": "^0.1.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

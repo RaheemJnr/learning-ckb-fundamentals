@@ -1,0 +1,808 @@
+# CKB RPC Interface
+
+## Overview
+
+Every CKB node exposes a **JSON-RPC 2.0** interface. This is the foundation on which wallets, block explorers, DApp backends, and monitoring tools are all built. Even the CCC SDK uses the RPC internally.
+
+In this lesson you will learn the complete RPC API: what methods exist, how to call them directly with `fetch()`, how to handle errors and pagination, and when to use the SDK versus raw RPC calls.
+
+By the end of this lesson, you will be able to:
+
+- Call any CKB RPC method directly from TypeScript
+- Understand every RPC method category and its purpose
+- Query live chain data: headers, blocks, transactions, cells, balances
+- Subscribe to new blocks and transactions in real time
+- Implement robust retry and error-handling logic
+- Know when to use raw RPC versus the CCC SDK
+
+## Prerequisites
+
+- Completion of Lessons 1-17
+- Node.js 18+ installed
+- Familiarity with async/await and TypeScript
+
+## Concepts
+
+### What Is JSON-RPC?
+
+JSON-RPC 2.0 is a simple remote procedure call protocol encoded in JSON. You send a request object and receive a response object:
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "get_tip_header",
+  "params": []
+}
+```
+
+**Success response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "number": "0xb1a3c0",
+    "hash": "0x4f3e...a1b2",
+    "timestamp": "0x18f1d3a4e00"
+  }
+}
+```
+
+**Error response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32602,
+    "message": "Invalid params"
+  }
+}
+```
+
+This is the same protocol used in Ethereum (`eth_getBlockByNumber` etc.), Bitcoin (`getblockchaininfo`), and many other blockchains.
+
+### Hex Encoding for Numbers
+
+CKB uses hex strings with a `0x` prefix for all integer values in RPC responses. This is because JSON numbers use IEEE 754 double-precision floating point, which only has 53 bits of mantissa. CKB timestamps and capacities can exceed 2^53, so they are transmitted as hex strings.
+
+```typescript
+// CKB RPC returns hex strings
+const tipHeader = await callRpc("get_tip_header");
+console.log(tipHeader.number);    // "0xb1a3c0"  (not 11640768)
+console.log(tipHeader.timestamp); // "0x18f1d3a4e00"  (milliseconds since epoch)
+
+// Convert using BigInt for safe 64-bit math
+const blockNum = BigInt(tipHeader.number);   // 11640768n
+const timestampMs = BigInt(tipHeader.timestamp);
+const date = new Date(Number(timestampMs));
+```
+
+### Transport Options
+
+CKB supports three transport mechanisms for the RPC:
+
+| Transport | Default Port | Characteristics |
+|-----------|-------------|-----------------|
+| HTTP | 8114 | Request/response, stateless, works everywhere |
+| TCP | 8114 | Raw socket, lower overhead, supports batching |
+| WebSocket | 18114 | Full-duplex, enables server-push subscriptions |
+
+Most public endpoints only expose HTTP. For WebSocket subscriptions (real-time events), you need a local node or a provider that supports WebSocket connections.
+
+To make an HTTP RPC call:
+
+```typescript
+async function callRpc<T>(
+  url: string,
+  method: string,
+  params: unknown[] = []
+): Promise<T> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: Date.now(),
+      method,
+      params,
+    }),
+  });
+
+  const json = await response.json();
+
+  if (json.error) {
+    throw new Error(`RPC ${json.error.code}: ${json.error.message}`);
+  }
+
+  return json.result;
+}
+```
+
+## Complete RPC Method Reference
+
+### Chain Methods
+
+These methods query the blockchain's committed state — blocks, headers, and transactions that are already finalized.
+
+| Method | Parameters | Returns | Description |
+|--------|-----------|---------|-------------|
+| `get_tip_header` | none | `Header` | Current chain tip header |
+| `get_tip_block_number` | none | `HexUint64` | Current block height |
+| `get_block` | `hash`, `verbosity?` | `Block` | Block by hash |
+| `get_block_by_number` | `number`, `verbosity?` | `Block` | Block by height |
+| `get_header` | `hash` | `Header` | Block header by hash |
+| `get_header_by_number` | `number` | `Header` | Block header by height |
+| `get_transaction` | `txHash`, `verbosity?` | `TransactionResult` | Transaction by hash |
+| `get_live_cell` | `outPoint`, `withData` | `LiveCellResult` | Cell status and data |
+| `get_blockchain_info` | none | `ChainInfo` | Chain name, epoch, difficulty |
+| `get_consensus` | none | `Consensus` | Chain consensus parameters |
+| `get_deployments_info` | none | `DeploymentsInfo` | Soft fork activation status |
+
+### Pool (Mempool) Methods
+
+The transaction pool holds pending and proposed transactions awaiting block inclusion.
+
+| Method | Parameters | Returns | Description |
+|--------|-----------|---------|-------------|
+| `send_transaction` | `tx`, `outputs_validator?` | `TxHash` | Submit a transaction |
+| `get_raw_tx_pool` | `verbose?` | `RawTxPool` | Mempool stats or full contents |
+| `get_pool_tx_detail_info` | `txHash` | `PoolTxDetailInfo` | Detailed info on one mempool tx |
+| `remove_transaction` | `txHash` | `bool` | Remove tx from pool (local only) |
+| `clear_tx_pool` | none | none | Clear all mempool txs (local only) |
+
+### Miner Methods
+
+Used by mining software to create and submit blocks.
+
+| Method | Parameters | Returns | Description |
+|--------|-----------|---------|-------------|
+| `get_block_template` | `bytes_limit?`, `proposals_limit?`, `max_version?` | `BlockTemplate` | Template for mining a new block |
+| `submit_block` | `work_id`, `block` | `Hash256` | Submit a mined block |
+
+### Stats Methods
+
+Network-level statistics and consensus parameters.
+
+| Method | Parameters | Returns | Description |
+|--------|-----------|---------|-------------|
+| `get_blockchain_info` | none | `BlockchainInfo` | Chain info, sync status |
+| `get_deployments_info` | none | `DeploymentsInfo` | Soft fork deployment states |
+
+### Net Methods
+
+Peer-to-peer network information. These typically require a local node — public endpoints disable them for privacy.
+
+| Method | Parameters | Returns | Description |
+|--------|-----------|---------|-------------|
+| `local_node_info` | none | `LocalNodeInfo` | This node's info and addresses |
+| `get_peers` | none | `RemoteNode[]` | Currently connected peers |
+| `get_banned_addresses` | none | `BannedAddr[]` | Banned peer addresses |
+| `set_ban` | `address`, `command`, `ban_time?`, `reason?` | none | Ban/unban a peer |
+| `sync_state` | none | `SyncState` | Sync progress (headers, blocks) |
+| `set_network_active` | `state` | none | Enable/disable networking |
+| `add_node` | `peer_id`, `address` | none | Manually connect to a peer |
+| `remove_node` | `peer_id` | none | Disconnect from a peer |
+| `ping_peers` | none | none | Ping all peers |
+| `get_peers_state` | none | `PeerState[]` | Detailed per-peer sync state |
+
+### Indexer Methods
+
+The embedded CKB indexer provides efficient cell queries by script. Requires `[indexer]` to be enabled in `ckb.toml`.
+
+| Method | Parameters | Returns | Description |
+|--------|-----------|---------|-------------|
+| `get_indexer_tip` | none | `IndexerTip` | Current indexer sync tip |
+| `get_cells` | `searchKey`, `order`, `limit`, `cursor?` | `CellPage` | Paginated cell query |
+| `get_transactions` | `searchKey`, `order`, `limit`, `cursor?` | `TxPage` | Paginated transaction query |
+| `get_cells_capacity` | `searchKey` | `CellsCapacity` | Total capacity sum |
+
+## Key Methods In Detail
+
+### get_tip_header
+
+Returns the header of the most recently committed block. This is typically the first call any application makes to verify the node is reachable and to establish the current chain state.
+
+```typescript
+const header = await callRpc("get_tip_header");
+
+// Header fields:
+// number          — block height (hex)
+// hash            — block hash (0x + 64 hex chars)
+// timestamp       — Unix timestamp in MILLISECONDS (hex)
+// parent_hash     — previous block's hash
+// transactions_root — Merkle root of all transactions
+// proposals_hash  — hash of the proposal zone
+// compact_target  — PoW difficulty target (hex)
+// epoch           — epoch number/index/length packed into uint64 (hex)
+// nonce           — PoW nonce (hex)
+// dao             — DAO deposit/withdraw accounting data
+// extra_hash      — hash of extension data
+
+console.log("Block number:", BigInt(header.number));
+console.log("Timestamp:", new Date(Number(BigInt(header.timestamp))));
+```
+
+The epoch field packs three numbers into one uint64:
+- Bits 63-40: epoch number (increases monotonically)
+- Bits 39-16: index within the epoch (block position)
+- Bits 15-0: epoch length (total blocks in this epoch)
+
+### get_block_by_number
+
+Fetches a complete block including all transactions. The `verbosity` parameter controls the response detail level:
+
+```typescript
+// verbosity=0: serialized binary (most compact, for relaying)
+const serialized = await callRpc("get_block_by_number", ["0x100", "0x0"]);
+
+// verbosity=1: JSON with only transaction hashes (lighter)
+const withHashes = await callRpc("get_block_by_number", ["0x100", "0x1"]);
+
+// verbosity=2: Full JSON with all transaction data (largest)
+const full = await callRpc("get_block_by_number", ["0x100", "0x2"]);
+
+// Block structure:
+// {
+//   header: Header,
+//   transactions: TransactionWithHash[],
+//   uncles: UncleBlock[],
+//   proposals: string[],
+//   extension: HexBytes | null
+// }
+
+// The first transaction is always the cellbase (block reward)
+const cellbase = full.transactions[0];
+const userTxs = full.transactions.slice(1);
+```
+
+CKB blocks contain:
+- **Transactions**: The cellbase plus user transactions
+- **Uncle blocks**: Orphaned blocks referenced for security metrics
+- **Proposals**: Short IDs of transactions being proposed for future commitment (2-phase commit)
+- **Extension**: Optional extra data (used for soft forks)
+
+### get_transaction
+
+Fetches a transaction by hash from either the mempool or the committed chain.
+
+```typescript
+const result = await callRpc("get_transaction", ["0xabcd..."]);
+
+// Result structure:
+// {
+//   transaction: Transaction | null,
+//   cycles: HexUint64 | null,      // compute cycles used
+//   time_added_to_pool: HexUint64 | null,
+//   min_replace_fee: HexUint64 | null,
+//   tx_status: {
+//     block_hash: Hash | null,
+//     block_number: HexUint64 | null,
+//     status: "pending" | "proposed" | "committed" | "rejected" | "unknown",
+//     reason: string | null,
+//     time_added_to_pool: HexUint64 | null
+//   }
+// }
+
+if (result.tx_status.status === "committed") {
+  console.log("Confirmed in block:", result.tx_status.block_number);
+} else if (result.tx_status.status === "pending") {
+  console.log("Still in mempool");
+} else if (result.tx_status.status === "rejected") {
+  console.log("Rejected:", result.tx_status.reason);
+}
+```
+
+Transaction statuses in CKB's 2-phase commit system:
+1. **pending** — in the mempool, not yet proposed
+2. **proposed** — short transaction ID appeared in a proposal zone
+3. **committed** — full transaction data committed to a block
+4. **rejected** — rejected for policy or validity reasons
+5. **unknown** — not found
+
+### get_live_cell
+
+Checks if a cell (identified by OutPoint) is currently live (unspent) or dead (already consumed).
+
+```typescript
+const result = await callRpc("get_live_cell", [
+  { tx_hash: "0xabc...", index: "0x0" },
+  true  // include data field
+]);
+
+// Result:
+// {
+//   cell: LiveCell | null,  // null if not found
+//   status: "live" | "dead" | "unknown"
+// }
+
+if (result.status === "live") {
+  const cell = result.cell;
+  console.log("Capacity:", BigInt(cell.output.capacity) / 10n**8n, "CKB");
+  console.log("Lock hash type:", cell.output.lock.hash_type);
+  console.log("Data:", cell.data?.content);  // hex-encoded bytes
+  console.log("Type script:", cell.output.type); // null if no type script
+} else if (result.status === "dead") {
+  console.log("Cell has already been spent");
+}
+```
+
+This is essential before building a transaction: always verify that your input cells are still live. If a cell was spent since you last checked, your transaction will be rejected.
+
+### get_cells_capacity
+
+Returns the total CKB capacity (in shannons) held by all live cells matching a lock script. This is how wallets compute balances efficiently.
+
+```typescript
+const capacity = await callRpc("get_cells_capacity", [{
+  script: {
+    // secp256k1/blake160 lock script (standard address type)
+    code_hash: "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+    hash_type: "type",
+    // 20-byte blake160 hash of the user's public key
+    args: "0x36c329ed630d6ce750712a477543672adab57f4c"
+  },
+  script_type: "lock"
+}]);
+
+// Result:
+// {
+//   capacity: HexUint64,    // total shannons
+//   block_hash: Hash256,    // block at which snapshot was taken
+//   block_number: HexUint64 // block height
+// }
+
+const ckb = Number(BigInt(capacity.capacity)) / 1e8;
+console.log(`Balance: ${ckb.toFixed(8)} CKB`);
+```
+
+Important: the result is a snapshot at a specific block height. New transactions in later blocks may change the balance.
+
+### send_transaction
+
+Submits a signed transaction to the mempool. This is how all CKB state changes happen.
+
+```typescript
+const txHash = await callRpc("send_transaction", [
+  {
+    version: "0x0",
+    cell_deps: [
+      {
+        out_point: {
+          tx_hash: "0x71a7ba8fc96349fea0ed3a5c47992e3b4084b031a42264a018e0072e8172e46c",
+          index: "0x0"
+        },
+        dep_type: "dep_group"
+      }
+    ],
+    header_deps: [],
+    inputs: [
+      {
+        previous_output: {
+          tx_hash: "0xabc...",
+          index: "0x0"
+        },
+        since: "0x0"
+      }
+    ],
+    outputs: [
+      {
+        capacity: "0x174876e800",  // 100 CKB in shannons
+        lock: {
+          code_hash: "0x9bd7e...",
+          hash_type: "type",
+          args: "0x36c329..."
+        },
+        type: null
+      }
+    ],
+    outputs_data: ["0x"],
+    witnesses: [
+      "0x5500000010000000550000005500000041000000..."
+      // secp256k1 witness: WitnessArgs with lock_sig filled
+    ]
+  },
+  "passthrough"  // outputs_validator: "passthrough" or "well_known_scripts_only"
+]);
+
+console.log("Submitted transaction:", txHash);
+```
+
+The `outputs_validator` parameter:
+- `"well_known_scripts_only"` (default): Only accepts transactions using well-known lock scripts. Safer, prevents some fee-draining attacks.
+- `"passthrough"`: Accepts any transaction. Required for custom scripts.
+
+## How CCC SDK Wraps the RPC
+
+The `@ckb-ccc/core` SDK provides a high-level TypeScript API built on top of raw RPC calls. Understanding this relationship helps you decide when to use the SDK versus direct RPC access.
+
+```
+Your Application
+      |
+      v
+CCC SDK (ccc.ClientPublicTestnet)
+      |
+      v
+CkbRpcClient (internal)
+      |
+      v
+JSON-RPC POST requests
+      |
+      v
+CKB Node (https://testnet.ckb.dev)
+```
+
+**SDK advantages:**
+- Automatic transaction building (fee calculation, input selection)
+- Type-safe cell model abstractions
+- Signer integration (hardware wallets, MetaMask, etc.)
+- Molecule encoding/decoding built in
+- Retry and error handling
+
+**Direct RPC advantages:**
+- Full access to all methods including Net and Miner
+- Lower-level control for custom tooling
+- No SDK abstractions when you need raw data
+- Useful for monitoring tools, block explorers, indexers
+
+```typescript
+import { ccc } from "@ckb-ccc/core";
+
+// SDK abstracts get_tip_header + get_block internally
+const client = new ccc.ClientPublicTestnet();
+
+// This single SDK call may invoke multiple RPC methods:
+await tx.completeInputsByCapacity(signer);
+// Internally calls:
+//   get_cells (indexer) to find spendable cells
+//   get_cells_capacity to check balance
+//   get_tip_header for fee estimation
+
+// For tasks the SDK does not cover, use raw RPC:
+const rawClient = new CkbRpcClient("https://testnet.ckb.dev");
+const peers = await rawClient.getPeers();  // Not available in CCC SDK
+```
+
+## Subscription API for Real-Time Updates
+
+WebSocket subscriptions allow the CKB node to push events to your application without polling. This requires a node with WebSocket enabled (typically a local node, port 18114).
+
+```typescript
+const ws = new WebSocket("ws://localhost:18114");
+
+let subscriptionId: string;
+
+ws.onopen = () => {
+  // Subscribe to new block headers
+  ws.send(JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "subscribe",
+    params: ["new_tip_header"]
+  }));
+};
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+
+  // The first message is the subscription confirmation
+  if (msg.id === 1 && msg.result) {
+    subscriptionId = msg.result;
+    console.log("Subscribed with ID:", subscriptionId);
+    return;
+  }
+
+  // Subsequent messages are subscription events
+  if (msg.method === "subscribe") {
+    const header = msg.params.result;
+    console.log("New block:", BigInt(header.number).toLocaleString());
+  }
+};
+
+ws.onerror = (err) => console.error("WebSocket error:", err);
+
+// To unsubscribe:
+function unsubscribe() {
+  ws.send(JSON.stringify({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "unsubscribe",
+    params: [subscriptionId]
+  }));
+}
+```
+
+Available subscription topics:
+
+| Topic | Event | Description |
+|-------|-------|-------------|
+| `new_tip_header` | `Header` | New block committed to the main chain |
+| `new_tip_block` | `Block` | New block with full transaction data |
+| `new_transaction` | `TransactionView` | Transaction entered the mempool |
+| `proposed_transaction` | `TransactionView` | Transaction entered proposed state |
+| `rejected_transaction` | `(TransactionView, Reason)` | Transaction rejected from mempool |
+
+## Pagination Patterns for Cell Queries
+
+The `get_cells` and `get_transactions` indexer methods return paginated results using cursor-based pagination. This is essential for wallets with many cells.
+
+```typescript
+async function getAllCells(
+  client: CkbRpcClient,
+  searchKey: SearchKey
+): Promise<Cell[]> {
+  const allCells: Cell[] = [];
+  let cursor: string | undefined = undefined;
+  const pageSize = "0x40"; // 64 cells per page
+
+  while (true) {
+    const params: unknown[] = cursor
+      ? [searchKey, "asc", pageSize, cursor]
+      : [searchKey, "asc", pageSize];
+
+    const page = await client.call("get_cells", params);
+
+    allCells.push(...page.objects);
+
+    // "0x" (empty cursor) signals the last page
+    if (page.last_cursor === "0x" || page.objects.length === 0) {
+      break;
+    }
+
+    cursor = page.last_cursor;
+  }
+
+  return allCells;
+}
+```
+
+Cursor-based pagination is stable even if new cells are created between page fetches. Unlike offset-based pagination, it does not skip or duplicate items.
+
+## Error Handling and Retry Strategies
+
+CKB RPC errors fall into two categories:
+
+**Transport errors**: Network failure, connection refused, HTTP 5xx
+**Protocol errors**: JSON-RPC error objects with specific codes
+
+```typescript
+class RpcError extends Error {
+  constructor(
+    public readonly code: number,
+    message: string
+  ) {
+    super(`RPC Error ${code}: ${message}`);
+  }
+}
+
+// Common CKB-specific error codes:
+// -1: Invalid transaction (script execution failed)
+// -2: Non-existent cell
+// -3: Conflicting transaction (double-spend)
+// -101: Transaction pool is full
+
+async function callWithRetry<T>(
+  fn: () => Promise<T>,
+  options: { maxRetries?: number; retryDelay?: number } = {}
+): Promise<T> {
+  const { maxRetries = 3, retryDelay = 1000 } = options;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isRpcError = err instanceof RpcError;
+      const isLastAttempt = attempt === maxRetries;
+
+      // Do not retry protocol errors (bad params, invalid tx, etc.)
+      if (isRpcError && err.code < -100) throw err;
+
+      if (isLastAttempt) throw err;
+
+      // Exponential backoff for transient errors
+      const delay = retryDelay * Math.pow(2, attempt);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw new Error("unreachable");
+}
+```
+
+## Rate Limiting and Connection Management
+
+Public RPC endpoints impose rate limits. For production applications:
+
+```typescript
+class RateLimitedRpcClient {
+  private queue: Array<() => void> = [];
+  private activeRequests = 0;
+  private readonly maxConcurrent = 5;
+  private readonly minDelayMs = 100; // 10 req/sec max
+
+  async call<T>(method: string, params: unknown[] = []): Promise<T> {
+    // Wait if at capacity
+    if (this.activeRequests >= this.maxConcurrent) {
+      await new Promise<void>(resolve => this.queue.push(resolve));
+    }
+
+    this.activeRequests++;
+
+    try {
+      const result = await this.rawCall<T>(method, params);
+      await new Promise(r => setTimeout(r, this.minDelayMs));
+      return result;
+    } finally {
+      this.activeRequests--;
+      // Release one queued request
+      this.queue.shift()?.();
+    }
+  }
+}
+```
+
+**Rate limit recommendations:**
+- Public testnet/mainnet: max 5-10 requests per second
+- Local node: effectively unlimited
+- For bulk sync: use batch JSON-RPC requests or a local node
+
+**Batch requests** (send multiple RPC calls in one HTTP request):
+```typescript
+const results = await fetch(url, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify([
+    { jsonrpc: "2.0", id: 1, method: "get_header_by_number", params: ["0x100"] },
+    { jsonrpc: "2.0", id: 2, method: "get_header_by_number", params: ["0x101"] },
+    { jsonrpc: "2.0", id: 3, method: "get_header_by_number", params: ["0x102"] },
+  ])
+});
+const [h1, h2, h3] = await results.json();
+```
+
+## Tutorial
+
+### Step 1: Create the RPC client
+
+```typescript
+async function callRpc<T>(
+  url: string,
+  method: string,
+  params: unknown[] = []
+): Promise<T> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const json = await res.json();
+  if (json.error) throw new Error(json.error.message);
+  return json.result;
+}
+
+const RPC_URL = "https://testnet.ckb.dev";
+```
+
+### Step 2: Fetch the chain tip
+
+```typescript
+const tip = await callRpc(RPC_URL, "get_tip_header");
+const blockNum = BigInt(tip.number);
+const ts = new Date(Number(BigInt(tip.timestamp)));
+
+console.log(`Current block: #${blockNum.toLocaleString()}`);
+console.log(`Block time: ${ts.toISOString()}`);
+console.log(`Block hash: ${tip.hash}`);
+```
+
+### Step 3: Fetch a full block
+
+```typescript
+const hexNum = "0x" + blockNum.toString(16);
+const block = await callRpc(RPC_URL, "get_block_by_number", [hexNum, "0x2"]);
+
+console.log(`Transactions: ${block.transactions.length}`);
+console.log(`Uncle blocks: ${block.uncles.length}`);
+
+// Decode block reward from cellbase
+const cellbase = block.transactions[0].transaction;
+const reward = BigInt(cellbase.outputs[0].capacity);
+console.log(`Block reward: ${Number(reward) / 1e8} CKB`);
+```
+
+### Step 4: Look up a transaction
+
+```typescript
+const txHash = block.transactions[0].hash;
+const txResult = await callRpc(RPC_URL, "get_transaction", [txHash]);
+
+console.log(`Status: ${txResult.tx_status.status}`);
+console.log(`Block: #${BigInt(txResult.tx_status.block_number)}`);
+```
+
+### Step 5: Query a balance
+
+```typescript
+const balance = await callRpc(RPC_URL, "get_cells_capacity", [{
+  script: {
+    code_hash: "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+    hash_type: "type",
+    args: "0x36c329ed630d6ce750712a477543672adab57f4c"
+  },
+  script_type: "lock"
+}]);
+
+const ckb = Number(BigInt(balance.capacity)) / 1e8;
+console.log(`Balance: ${ckb.toFixed(8)} CKB`);
+```
+
+### Step 6: Monitor for new blocks
+
+```typescript
+let lastBlock = blockNum;
+
+const poll = setInterval(async () => {
+  const tip = await callRpc(RPC_URL, "get_tip_header");
+  const current = BigInt(tip.number);
+
+  if (current > lastBlock) {
+    console.log(`New block! #${current.toLocaleString()}`);
+    lastBlock = current;
+  }
+}, 5000);
+
+// Stop after 60 seconds
+setTimeout(() => clearInterval(poll), 60_000);
+```
+
+## Real-World Uses
+
+### CKB Explorer
+
+CKB Explorer (explorer.nervos.org) uses the RPC to:
+- Display the current chain tip and recent blocks
+- Show transaction inputs, outputs, and script details
+- Search for transactions, addresses, and blocks by hash
+- Display cell data decoded in various formats
+
+It calls `get_block_by_number` in sequence to index all blocks, then serves queries from its own database.
+
+### Wallet Backends
+
+A wallet backend like Neuron (the official CKB desktop wallet) uses:
+- `get_cells` (indexer) to find all cells owned by a user's keys
+- `get_cells_capacity` to compute balances quickly
+- `send_transaction` to broadcast signed transactions
+- `get_transaction` to track confirmation status
+
+### Monitoring Tools
+
+Blockchain monitoring dashboards poll:
+- `get_tip_header` every few seconds for block height
+- `get_raw_tx_pool` for mempool size and fee rates
+- `get_blockchain_info` for sync status and network metrics
+- `get_peers` (local node) for P2P network health
+
+### Custom Indexers
+
+Applications that need custom query patterns (e.g., "find all xUDT token cells") build their own indexers by:
+1. Calling `get_block_by_number` starting from block 0
+2. Processing each transaction's inputs and outputs
+3. Storing cell data in their own database (PostgreSQL, Redis, etc.)
+4. Exposing a custom API tailored to their use case
+
+## Summary
+
+The CKB JSON-RPC interface is the universal access layer for the CKB blockchain. You have learned:
+
+- **Protocol**: JSON-RPC 2.0 over HTTP, TCP, or WebSocket, with hex-encoded integers
+- **Method categories**: Chain, Pool, Miner, Stats, Net, Indexer — each serving different purposes
+- **Key methods**: `get_tip_header`, `get_block_by_number`, `get_transaction`, `get_live_cell`, `get_cells_capacity`, `send_transaction`
+- **Subscriptions**: WebSocket-based push events for real-time block and transaction monitoring
+- **Pagination**: Cursor-based pagination for efficient cell queries with the indexer API
+- **Error handling**: JSON-RPC error codes, retry strategies with exponential backoff
+- **Rate limiting**: Concurrency control for production applications
+- **SDK relationship**: CCC wraps the RPC for convenience; raw RPC gives full control
+
+In **Lesson 19**, you will set up your own CKB full node to gain unrestricted RPC access, understand how node configuration works, and see how blocks propagate across the P2P network.

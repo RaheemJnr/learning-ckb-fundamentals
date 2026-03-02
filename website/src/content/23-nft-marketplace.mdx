@@ -1,0 +1,476 @@
+# Full-Stack dApp: NFT Marketplace
+
+## Overview
+
+This is the capstone application lesson of the course. You will bring together every major concept from Lessons 1 through 22 — the cell model, lock scripts, type scripts, xUDT tokens, Spore NFTs, Omnilock, CCC, and the order cell pattern — to build a complete, production-ready NFT marketplace on CKB.
+
+By the end of this lesson, you will understand not just how each piece works in isolation, but how they compose into a full-stack decentralized application that operates without any trusted backend infrastructure.
+
+## Bringing It All Together
+
+A functioning NFT marketplace on CKB requires coordinating multiple layers of the stack.
+
+**Layer 1 — The cell model** (Lessons 1–3): Every NFT, every listing, and every payment is a cell. Understanding capacity, lock scripts, and type scripts is foundational to everything the marketplace does.
+
+**Layer 2 — Scripts** (Lessons 7–12): The Spore type script enforces NFT uniqueness and burn rules. The marketplace lock script enforces sale terms. Omnilock enables users with any wallet to interact with the marketplace.
+
+**Layer 3 — Protocols** (Lessons 13–16): xUDT establishes how tokens are transferred. Spore defines the NFT standard. Composability (Lesson 16) is how these protocols work together without modification.
+
+**Layer 4 — SDK and wallet** (Lessons 15, 18): CCC builds transactions, makes RPC calls, and manages signing. CCC's `connector-react` brings wallet support to the browser.
+
+**Layer 5 — Frontend**: Next.js renders the marketplace UI, reads cell data to display NFT content, and submits signed transactions to the network.
+
+## NFT Marketplace Architecture on CKB
+
+The marketplace has two on-chain objects:
+
+**Spore cells** hold the actual NFTs. Each Spore cell contains the NFT content directly in its data field (no external URLs).
+
+**Sale order cells** announce that an NFT is for sale. They reference the Spore cell's ID and encode the seller's address and asking price in their lock script args.
+
+There is no marketplace contract account. The logic is distributed: the Spore type script enforces NFT rules, and the marketplace lock script enforces sale rules. Every node in the CKB network validates both during transaction processing.
+
+## The Spore Protocol
+
+Spore is CKB's native NFT protocol. Its defining characteristic is **on-chain content storage** — the actual bytes of the NFT (image data, text, SVG, JSON) are stored in the cell's data field, not a URL pointing to an external server.
+
+### Spore Cell Structure
+
+```
+capacity  : covers all fields (8 bytes + lock + type + data)
+lock      : owner's lock script (JoyID/Omnilock/SECP256K1)
+type      :
+  code_hash: Spore type script code hash
+  hash_type: "data1"
+  args     : spore_id (32 bytes, globally unique)
+data      : SporeData (molecule-encoded binary)
+  content_type: string (MIME type)
+  content     : bytes (actual file bytes)
+  cluster_id  : Option<[u8; 32]> (collection membership)
+```
+
+### How Spore IDs Are Unique
+
+The Spore ID is computed from the first input cell's outpoint in the creation transaction:
+
+```
+spore_id = blake2b(first_input_tx_hash ++ first_input_index)
+```
+
+Because each UTXO (outpoint) can only be consumed once, this computation produces a globally unique ID without any central registry. This is the same approach CKB uses for type IDs in script deployment.
+
+### Supported Content Types
+
+```
+text/plain       - Plain text, poetry, messages
+image/png        - PNG images stored as raw bytes
+image/svg+xml    - SVG vector art (most popular - small and expressive)
+application/json - Structured data with traits and metadata
+text/html        - Interactive HTML NFTs rendered in browsers
+```
+
+The protocol is content-type agnostic. Any MIME type is valid.
+
+### On-Chain Storage Costs
+
+Storing content on CKB costs CKBytes proportionally to size:
+
+- Base overhead per cell: ~94 bytes (~94 CKB)
+- Per content byte: 1 byte = 1 CKB
+
+A 1 KB SVG animation costs approximately 1,094 CKB total. This cost constraint has produced a creative community focused on small, efficient content — generative SVG art, haiku poetry, procedural pixel art. The economics drive aesthetic choices in an interesting way.
+
+### Spore Burn Economics
+
+Unlike most NFT standards, Spore cells can be permanently burned. When you burn a Spore, you destroy the NFT and reclaim the CKBytes locked as capacity. This creates a natural floor price for every Spore NFT: it is always worth at least its storage cost in CKB. An NFT with 500 CKB of content can always be burned for 500 CKB, regardless of what the market thinks of the art.
+
+## Listing NFTs for Sale
+
+To list a Spore NFT for sale, the seller performs two steps in a single transaction:
+
+**Step 1**: Change the Spore cell's lock from their standard lock to the marketplace lock. This is the CKB equivalent of "approving" a token — it gives the marketplace lock script control over the Spore cell during the sale period.
+
+**Step 2**: Create a sale order cell encoding the listing details:
+
+```
+Sale Order Cell:
+  capacity  : minimum storage (~100 CKB)
+  lock      :
+    code_hash: marketplace lock code hash
+    args     :
+      [0..32]  spore_id        (which Spore is for sale)
+      [32..52] seller_blake160 (who receives the CKB payment)
+      [52..68] asking_price    (uint128 little-endian, in shannons)
+  type      : None
+  data      : optional listing metadata
+```
+
+The sale order cell is the listing. Any indexer scanning for cells with the marketplace lock code hash can find all active listings without executing any code.
+
+### Why Separate the Spore from the Order Cell?
+
+An alternative design would be to put the Spore directly inside the order cell (as a combined type+lock script cell). Separating them is cleaner because:
+
+- The Spore cell retains its Spore type script (maintaining protocol compliance)
+- The order cell is a lightweight reference with no type script
+- The design is easier to index and decode
+- Protocol upgrades can change the order format without touching the Spore standard
+
+This is composability in practice: use existing standards as building blocks without modifying them.
+
+## Buying NFTs: Atomic Swap
+
+A buy transaction atomically transfers the NFT and payment in one block:
+
+```
+Inputs:
+  [0] Spore cell (locked with marketplace lock)
+  [1] Sale order cell (the listing)
+  [2] Buyer's CKB cells (price + Spore capacity + fee)
+
+Outputs:
+  [0] Buyer's Spore cell (same content, now locked with buyer's lock)
+  [1] Seller's payment cell (asking price in CKB)
+  [2] Buyer's change cell (excess CKB returned)
+```
+
+The marketplace lock script runs when both the sale order cell and the Spore cell are consumed. It verifies:
+
+1. Output `[0]` is the correct Spore cell (matching `spore_id` from args)
+2. Output `[0]` lock is the buyer's address (NFT is being transferred to buyer)
+3. Output `[1]` sends at least `asking_price` CKB to `seller_blake160` (from args)
+4. The Spore type script validates normally (NFT invariants are preserved)
+
+If any condition fails, the entire transaction is rejected. The buyer cannot receive the NFT without paying, and the seller cannot receive payment without delivering the NFT.
+
+### What the Buyer Actually Pays
+
+The total cost to the buyer is:
+```
+asking_price + spore_cell_capacity + transaction_fee
+```
+
+The buyer receives the Spore cell along with its full capacity. The seller receives only the asking price. The buyer effectively "deposits" the storage cost when they take ownership of the NFT.
+
+## Canceling a Listing
+
+The marketplace lock script has two unlock paths, just like the DEX order lock from Lesson 22:
+
+**Sale path**: Anyone can unlock by satisfying the exchange conditions (buyer pays the asking price and receives the Spore).
+
+**Cancel path**: The seller can unlock by providing a valid signature, returning the Spore to their personal lock.
+
+```
+Cancel Transaction:
+  Inputs:
+    [0] Spore cell (marketplace lock)
+    [1] Sale order cell (the listing)
+
+  Outputs:
+    [0] Seller's Spore cell (lock changed back to seller's standard lock)
+    [1] Seller's reclaimed order cell capacity
+
+  Witness:
+    Seller's signature (verified against seller_blake160 in args)
+```
+
+The marketplace lock detects no valid purchase conditions, falls through to the cancel path, and verifies the seller's signature. After cancellation, the seller owns the Spore directly again — no marketplace lock, no sale order cell.
+
+## Connecting Wallets with CCC Connector React
+
+`@ckb-ccc/connector-react` provides a complete wallet connection solution for React and Next.js applications.
+
+### Provider Setup
+
+```tsx
+// app/layout.tsx
+import { CccProvider } from "@ckb-ccc/connector-react";
+
+export default function RootLayout({ children }) {
+  return (
+    <html>
+      <body>
+        <CccProvider>
+          {children}
+        </CccProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+### Connecting and Using a Wallet
+
+```tsx
+// components/ConnectButton.tsx
+"use client";
+import { useCcc } from "@ckb-ccc/connector-react";
+
+export function ConnectButton() {
+  const { open, wallet, signer } = useCcc();
+
+  return (
+    <button onClick={() => open()}>
+      {wallet ? `Connected: ${wallet.name}` : "Connect Wallet"}
+    </button>
+  );
+}
+```
+
+### Building and Signing a Buy Transaction
+
+```tsx
+"use client";
+import { useCcc } from "@ckb-ccc/connector-react";
+import * as ccc from "@ckb-ccc/core";
+
+function BuyButton({ listing }) {
+  const { signer, client } = useCcc();
+
+  async function handleBuy() {
+    if (!signer) return;
+
+    const buyerAddress = await signer.getAddress();
+
+    // Build transaction inputs and outputs
+    const tx = ccc.Transaction.from({
+      inputs: [
+        { previousOutput: listing.sporeCellOutpoint },
+        { previousOutput: listing.orderCellOutpoint },
+      ],
+      outputs: [
+        {
+          // Buyer receives the Spore
+          capacity: listing.spore.capacity,
+          lock: (await signer.getAddressObj()).script,
+          type: SPORE_TYPE_SCRIPT,
+        },
+        {
+          // Seller receives the payment
+          capacity: listing.askingPrice,
+          lock: sellerLock,
+        },
+      ],
+      outputsData: [listing.spore.encodedData, "0x"],
+    });
+
+    // Complete fee and change automatically
+    await tx.completeInputsByCapacity(signer);
+    await tx.completeFeeBy(signer, 1000);
+
+    // Sign and broadcast
+    const txHash = await signer.sendTransaction(tx);
+    alert(`Purchase complete! TX: ${txHash}`);
+  }
+
+  return <button onClick={handleBuy}>Buy for {listing.askingPriceCkb} CKB</button>;
+}
+```
+
+## Reading and Displaying NFT Content
+
+NFT content is stored as raw bytes in the Spore cell's data field. Reading and rendering it in the frontend:
+
+```typescript
+// Fetch a Spore cell and decode its content
+async function fetchSporeContent(sporeId: string, client: ccc.Client) {
+  const [cell] = await client.findCells({
+    script: { ...SPORE_TYPE_SCRIPT, args: sporeId },
+    scriptType: "type",
+    scriptSearchMode: "exact",
+  });
+
+  if (!cell) return null;
+
+  // Decode molecule-encoded SporeData
+  const sporeData = decodeSporeData(cell.outputData);
+  return sporeData;
+}
+
+// React component to render any Spore content type
+function SporeViewer({ contentType, content }) {
+  if (contentType.startsWith("text/")) {
+    return <pre>{new TextDecoder().decode(content)}</pre>;
+  }
+
+  if (contentType.startsWith("image/")) {
+    const blob = new Blob([content], { type: contentType });
+    const url = URL.createObjectURL(blob);
+    return <img src={url} alt="Spore NFT" />;
+  }
+
+  if (contentType === "text/html") {
+    const html = new TextDecoder().decode(content);
+    return <iframe srcDoc={html} sandbox="allow-scripts" />;
+  }
+
+  return <div>[Unsupported content type: {contentType}]</div>;
+}
+```
+
+## Marketplace Frontend Patterns
+
+A complete marketplace frontend organized around Next.js App Router:
+
+```
+app/
+├── layout.tsx          # CccProvider, global styles
+├── page.tsx            # Listing grid (fetch active order cells from indexer)
+├── nft/[sporeId]/      # NFT detail page (content, history, buy button)
+├── profile/            # User's owned NFTs and active listings
+└── sell/               # Create new listing wizard
+
+components/
+├── NftCard.tsx         # Thumbnail, price, "Buy" button
+├── SporeViewer.tsx     # Content renderer (text/image/svg/html)
+├── ConnectButton.tsx   # Wallet connection UI
+└── TransactionStatus.tsx  # Pending → Confirmed → Failed states
+```
+
+### Fetching Active Listings
+
+```typescript
+// Query the indexer for all active sale order cells
+async function fetchActiveListings(client: ccc.Client): Promise<NftListing[]> {
+  const cells = await client.findCells({
+    script: {
+      codeHash: MARKETPLACE_LOCK_CODE_HASH,
+      hashType: "type",
+      args: "0x",  // No args filter - return all listings
+    },
+    scriptType: "lock",
+    scriptSearchMode: "prefix",
+  });
+
+  return cells.map(cell => decodeOrderCellArgs(cell.cellOutput.lock.args));
+}
+```
+
+## Security Considerations
+
+### Validating Transactions Before Signing
+
+Never sign a transaction without verifying its contents. Before calling `signer.sendTransaction(tx)`, inspect every output:
+
+```typescript
+// Verify the transaction looks exactly as expected
+function validateBuyTransaction(tx, listing, buyerAddress) {
+  const sporeOutput = tx.outputs[0];
+  const paymentOutput = tx.outputs[1];
+
+  // Check NFT goes to the buyer
+  assert(deriveAddress(sporeOutput.lock) === buyerAddress,
+    "Spore output must go to buyer");
+
+  // Check correct Spore is being transferred
+  assert(sporeOutput.type.args === listing.sporeId,
+    "Wrong Spore ID in transaction");
+
+  // Check seller receives at least the asking price
+  assert(paymentOutput.capacity >= listing.askingPrice,
+    "Seller payment insufficient");
+
+  // Check seller receives the payment (not some other address)
+  assert(deriveAddress(paymentOutput.lock) === listing.sellerAddress,
+    "Payment must go to seller");
+}
+```
+
+### Preventing Bait-and-Switch
+
+An attacker could create a listing advertising a high-value NFT but substituting a cheap one at transaction time. Defense: always verify the Spore ID in the transaction inputs matches what was displayed to the user before they initiated the purchase.
+
+### Race Conditions
+
+Two buyers might attempt to purchase the same NFT simultaneously. One transaction will succeed; the other will fail because the sale order cell is already consumed. Your frontend should:
+
+- Catch the "dead cell" error from the RPC
+- Inform the user gracefully ("This NFT was sold to someone else")
+- Reload the listing page to show updated availability
+
+### Script Hash Verification
+
+Before displaying an NFT or listing, verify that the type script code hash matches the known deployed Spore script. This prevents fake "NFTs" with unrelated type scripts from appearing as legitimate Spore NFTs in your marketplace.
+
+## Real-World: JoyID Marketplace and CKB NFTs
+
+**JoyID** is the primary NFT marketplace on CKB. It demonstrates this architecture in production:
+
+- Passkey (biometric) authentication — no seed phrases required
+- All NFTs use the Spore protocol (on-chain content)
+- The marketplace uses order cells for atomic swaps
+- CCC handles all transaction building and wallet interactions
+
+Notable aspects of the CKB NFT ecosystem built on Spore:
+- Generative SVG art collections that render entirely on-chain
+- Text poetry and literary NFTs
+- Interactive HTML NFTs that execute in the browser
+- Game items with JSON metadata and on-chain attributes
+
+The **Spore SDK** (`@spore-sdk/core`) provides production-ready functions:
+
+```typescript
+import { createSpore, transferSpore, burnSpore } from "@spore-sdk/core";
+
+// Create a new NFT
+const { txSkeleton } = await createSpore({
+  data: {
+    contentType: "image/svg+xml",
+    content: svgBytes,
+  },
+  fromInfos: [address],
+  toLock: ownerLock,
+});
+```
+
+Resources:
+- Spore SDK: https://github.com/sporeprotocol/spore-sdk
+- Spore Docs: https://docs.spore.pro
+- JoyID: https://app.joy.id
+
+## Step-by-Step Tutorial
+
+### Step 1: Install Dependencies
+
+```bash
+cd lessons/23-nft-marketplace
+npm install
+```
+
+### Step 2: Run the Demo
+
+```bash
+npm start
+```
+
+### Step 3: Understand the Spore Structure
+
+Open `src/marketplace-logic.ts` and read the `SporeNft` interface and `MarketplaceState.mintNft` method. Notice how the capacity is calculated from the content size.
+
+### Step 4: Trace a Buy Transaction
+
+Find `buyNft` in `marketplace-logic.ts`. Read the comment describing the on-chain transaction structure. Note how the Spore cell's lock changes from the marketplace lock to the buyer's lock.
+
+### Step 5: Study the Wallet Connection Code
+
+In `src/index.ts`, find `explainWalletConnection`. This section contains the actual React code patterns you would use in a Next.js app.
+
+### Step 6: Review Security Considerations
+
+Find `explainSecurity`. Think about which checks your frontend should perform automatically vs which require explicit user confirmation.
+
+## Summary
+
+A CKB NFT marketplace is built from composable primitives:
+
+- Spore cells store NFT content on-chain (no external dependencies)
+- Sale order cells announce listings with price and seller information
+- Buy transactions atomically swap CKB for Spore ownership
+- The marketplace lock script enforces sale terms without a contract account
+- CCC connector-react handles wallet connection across JoyID, MetaMask, and hardware wallets
+- NFT content is decoded from cell data and rendered directly in the frontend
+- Security comes from validating transaction contents before signing
+
+This is a complete decentralized application that operates without any trusted backend server. The on-chain cells are the database. The lock and type scripts are the business logic. CCC and React are the user interface. Together, they form a marketplace that is trustless, permissionless, and censorship-resistant.
+
+In the final lesson, you will learn how to deploy such a system to CKB mainnet safely, including security audits, key management, and production monitoring.

@@ -1,0 +1,101 @@
+{
+  "lessonId": 18,
+  "questions": [
+    {
+      "id": 1,
+      "question": "Why does CKB JSON-RPC encode all integer values as hex strings (e.g., \"0x3e8\" instead of 1000) rather than using JSON numbers?",
+      "options": [
+        "Because hex strings are faster to parse than decimal numbers in JavaScript runtimes",
+        "Because JSON numbers use IEEE 754 double-precision floating point, which only has 53 bits of mantissa — insufficient to represent CKB's 64-bit values like timestamps and capacities without precision loss",
+        "Because the CKB team prefers hexadecimal notation for aesthetics and it makes debugging easier",
+        "Because JSON-RPC 2.0 requires all numeric parameters to be strings per the specification"
+      ],
+      "correctAnswer": 1,
+      "explanation": "JavaScript's Number type is a 64-bit IEEE 754 double, which can only represent integers up to 2^53 (about 9 quadrillion) exactly. CKB timestamps are in milliseconds since the Unix epoch and cell capacities can be very large numbers that exceed 2^53 when represented in shannons. If JSON returned these as plain numbers, JavaScript would silently lose precision. By using hex strings like \"0x18f1d3a4e00\", CKB ensures values are transmitted losslessly and callers can parse them with BigInt() for safe 64-bit arithmetic."
+    },
+    {
+      "id": 2,
+      "question": "Which CKB JSON-RPC method is the most efficient way to check the total CKB balance of an address, and why?",
+      "options": [
+        "get_block_by_number, called repeatedly to scan all blocks and sum the outputs matching the address",
+        "get_live_cell, called for every known OutPoint belonging to the address and summed manually",
+        "get_cells_capacity, which returns the pre-computed sum of all live cell capacities matching a lock script in a single RPC call",
+        "get_transaction, called for every transaction the address has participated in to reconstruct its UTXO set"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The get_cells_capacity method is specifically designed for balance lookups. It accepts a search key (lock script) and returns the total capacity across all matching live cells in a single server-side computation — you do not need to fetch individual cells. This is far more efficient than scanning blocks or fetching individual cells because the indexer maintains a pre-built index of cells grouped by lock script. The result includes the block hash and number at which the snapshot was taken, so you know exactly which state the balance reflects."
+    },
+    {
+      "id": 3,
+      "question": "What does the `tx_status.status` field in a `get_transaction` response mean when it returns \"proposed\"?",
+      "options": [
+        "The transaction has been fully confirmed and finalized in a block that is now several confirmations deep",
+        "The transaction's short ID (proposal ID) appeared in the proposal zone of a recent block, meaning it is in the first phase of CKB's 2-phase commit system — it must still be included with full data in a subsequent block to be committed",
+        "The transaction was proposed by the user and submitted to the mempool but has not yet been seen by any miner",
+        "The transaction is in conflict with another pending transaction and is waiting for arbitration"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB uses a 2-phase commit system for transaction finalization. In Phase 1, a miner includes the transaction's short proposal ID in the proposal zone of a block. This puts the transaction in \"proposed\" status. In Phase 2, after a configurable delay (typically 2-10 blocks), the miner must include the full transaction data in a subsequent block, at which point the status becomes \"committed\". This design separates propagation from finalization, helping reduce orphan block rates. A \"proposed\" transaction is not yet final — it only becomes final when \"committed\"."
+    },
+    {
+      "id": 4,
+      "question": "What is the difference between CKB's HTTP and WebSocket RPC transports, and what unique capability does WebSocket provide?",
+      "options": [
+        "WebSocket is slower but more secure because it encrypts all data; HTTP is faster but unencrypted",
+        "HTTP supports all methods while WebSocket only supports chain queries — it cannot send transactions",
+        "Both support the same request/response methods, but WebSocket additionally supports the subscribe/unsubscribe methods which allow the node to push real-time events (new blocks, mempool changes) without polling",
+        "HTTP uses JSON-RPC 1.0 and WebSocket uses JSON-RPC 2.0; the main difference is the protocol version"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Both HTTP and WebSocket support the same JSON-RPC 2.0 request/response methods. The key difference is that WebSocket is a persistent, full-duplex connection that allows the server to push data to the client. CKB nodes use this for subscriptions: you send a subscribe request once and the node pushes events to you as they occur — new blocks (new_tip_header, new_tip_block), mempool changes (new_transaction, rejected_transaction). Without WebSocket, you must poll repeatedly with get_tip_header or get_raw_tx_pool, which introduces latency and wastes bandwidth."
+    },
+    {
+      "id": 5,
+      "question": "What does cursor-based pagination look like for the `get_cells` indexer method, and why is it preferred over offset-based pagination?",
+      "options": [
+        "get_cells uses page numbers starting at 1; cursor-based means passing page=1, page=2, etc., which the indexer tracks server-side",
+        "get_cells accepts a last_cursor value from the previous response as the starting point for the next page; this is stable because new cells created between page fetches do not shift the position of previously-seen cells",
+        "Cursor pagination uses the cell's OutPoint as a bookmark; you pass the last OutPoint received and the indexer returns the next batch after it",
+        "CKB does not support pagination for get_cells — all cells are returned in a single response, which may be very large"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The get_cells method uses opaque cursor strings for pagination. After each page, the response includes a last_cursor field. Pass this value as the fourth parameter on the next call to get the subsequent page. When last_cursor is \"0x\" (empty), you have reached the last page. Cursor-based pagination is superior to offset-based (e.g., LIMIT 100 OFFSET 500) because it is stable: if new cells are created between page 1 and page 2, offset-based pagination might skip or duplicate cells, while cursor-based pagination maintains exact position based on a stable sort order in the index."
+    },
+    {
+      "id": 6,
+      "question": "Which combination of RPC methods would a wallet application use to discover a user's cells and build a transfer transaction?",
+      "options": [
+        "Only send_transaction is needed — the node assembles the transaction automatically from the user's address",
+        "First get_cells_capacity to check if the balance is sufficient, then get_cells to fetch individual unspent cells for use as inputs, then send_transaction to broadcast the signed transaction",
+        "get_block repeatedly from genesis until present to reconstruct the full history, then get_live_cell for each output found, then send_transaction",
+        "get_transaction for every past transaction to find unspent outputs, then get_block_by_number for the tip to get the current fee rate, then send_transaction"
+      ],
+      "correctAnswer": 1,
+      "explanation": "A typical wallet workflow uses three indexer+chain methods: (1) get_cells_capacity to quickly check if the address has enough balance (one call, no need to fetch individual cells); (2) get_cells to retrieve the actual live cell objects with their OutPoints — these become the transaction inputs, and you need their capacity and lock script to build a valid transaction; (3) send_transaction to broadcast the fully-constructed, signed transaction. The CCC SDK automates this with completeInputsByCapacity(), which calls get_cells internally and handles input selection, fee calculation, and change output creation."
+    },
+    {
+      "id": 7,
+      "question": "What does the `verbosity` parameter control in `get_block_by_number`, and when would you use each level?",
+      "options": [
+        "Verbosity controls the logging detail on the node's server side — it has no effect on the response returned to the client",
+        "Verbosity 0 returns serialized binary (for relaying blocks efficiently), verbosity 1 returns JSON with only transaction hashes (for block listing), verbosity 2 returns full JSON with complete transaction data (for detailed analysis)",
+        "Verbosity controls whether uncle block headers are included: 0 excludes uncles, 1 includes uncle hashes, 2 includes full uncle data",
+        "Verbosity is only relevant for the Miner API's get_block_template method; get_block_by_number ignores the parameter"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The verbosity parameter directly controls the size and format of the block response. Verbosity 0 returns the block as a hex-encoded serialized binary — the smallest possible representation, useful for relaying blocks between nodes or storing raw block data. Verbosity 1 returns a JSON object where transactions are represented only by their hashes — much smaller than full data, useful for block listing pages or checking which transactions are in a block. Verbosity 2 returns the full JSON with all transaction inputs, outputs, witnesses, and cell deps — the largest response, needed when you want to inspect transaction details."
+    },
+    {
+      "id": 8,
+      "question": "What is the recommended approach for handling transient RPC failures (e.g., network timeouts, HTTP 503 errors) versus permanent protocol errors (e.g., JSON-RPC error code -32602 Invalid params)?",
+      "options": [
+        "All errors should be retried up to 10 times with a fixed 1-second delay; if it still fails after 10 attempts, throw the error",
+        "Transient network errors should be retried with exponential backoff; JSON-RPC protocol errors with specific codes should NOT be retried because retrying a malformed request will always produce the same error",
+        "Only errors that occur during send_transaction should be retried; read-only methods like get_tip_header should never be retried",
+        "Errors should always be surfaced immediately to the user without retrying, because automatic retries can cause duplicate transactions to be submitted"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Retry strategies should be selective. Transient errors — network timeouts, connection resets, HTTP 5xx server errors — are caused by temporary conditions (node overload, network blip) that may resolve on the next attempt. These benefit from retries with exponential backoff (e.g., wait 1s, 2s, 4s between attempts). In contrast, JSON-RPC protocol errors like -32602 (invalid params), -32601 (method not found), or CKB transaction errors (-1: script failed, -3: double spend) indicate a logical problem with your request. Retrying these is pointless — the request will fail the same way every time. A robust RPC client checks the error type before retrying and immediately surfaces non-retryable errors."
+    }
+  ]
+}

@@ -1,0 +1,101 @@
+{
+  "lessonId": 22,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What is an 'order cell' in CKB's DEX design?",
+      "options": [
+        "A special type of account contract that holds all orders for a trading pair",
+        "A regular CKB cell with a specialized lock script whose args encode the maker's exchange requirements (CKB to sell, token type, minimum tokens to receive)",
+        "A cell that stores the global order book state and is updated by a relayer service",
+        "A cell containing compiled DEX bytecode that executes when called by users"
+      ],
+      "correctAnswer": 1,
+      "explanation": "An order cell is an ordinary CKB cell where the special design lives entirely in the lock script. The lock script's code enforces the exchange rules, and its args encode the specific trade parameters for this particular order: the maker's address (who receives incoming tokens), the token type hash (which xUDT token is expected), and the minimum token amount (uint128 little-endian). The same lock script code is shared across all orders on the exchange; only the args differ. This means one deployed script handles the entire order book, and the order cell's capacity (CKB) represents exactly the amount being sold."
+    },
+    {
+      "id": 2,
+      "question": "How does the atomic swap guarantee work when filling an order on CKB?",
+      "options": [
+        "A trusted relayer service monitors both the maker's and taker's wallets and coordinates the transfer in two sequential steps",
+        "The DEX contract on Ethereum locks both assets simultaneously before releasing them on CKB via a cross-chain bridge",
+        "CKB transactions are atomic by design: a fill transaction consumes the order cell and all input cells simultaneously while creating all output cells simultaneously, making partial execution impossible",
+        "The maker and taker pre-sign a special 'atomic swap commitment' that is enforced by the mempool rules"
+      ],
+      "correctAnswer": 2,
+      "explanation": "CKB's transaction model provides atomicity as a fundamental property: either ALL inputs are consumed and ALL outputs are created in the same block, or nothing happens. A fill transaction takes the order cell (CKB) and the taker's token cell as inputs, and produces the maker's token output and the taker's CKB output simultaneously. The order cell's lock script runs during validation and checks that both outputs exist and contain the correct amounts. There is no intermediate state, no multi-step protocol, and no trusted coordinator — the atomicity is enforced by every node in the network when they validate the transaction."
+    },
+    {
+      "id": 3,
+      "question": "What happens when a taker only provides a fraction of the tokens required by an order?",
+      "options": [
+        "The transaction is rejected; orders must be filled completely or not at all",
+        "The taker receives proportional CKB and a 'remainder order cell' is created with the same exchange rate but reduced capacity and reduced minimum token amount",
+        "The taker receives all the CKB from the order cell in exchange for their partial token amount as a bonus for filling the order",
+        "The lock script automatically splits the order into two equal halves and fills one half"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Partial fills work by proportional math and create a remainder order cell. If the original order has 1000 CKB for 500 MYTOKEN, and a taker provides only 250 MYTOKEN (50%), they receive 500 CKB (50%). The fill transaction creates three outputs: the maker's token cell (250 MYTOKEN), the taker's CKB cell (500 CKB), and a remainder order cell (500 CKB, same lock args, minimum 250 MYTOKEN required). The remainder cell has the identical exchange rate as the original and can be filled by any subsequent taker. This allows orders to be filled incrementally by multiple takers across multiple transactions."
+    },
+    {
+      "id": 4,
+      "question": "Why are trade parameters stored in the lock script's args rather than in the cell's data field?",
+      "options": [
+        "The data field is reserved for xUDT token amounts and cannot be used for other purposes",
+        "Args are cheaper to store than data because they are not committed to the blockchain",
+        "The lock script has free access to its own args without extra syscalls, the args are immutable once the cell is created preventing parameter tampering, and anyone can reconstruct the order book from args without executing code",
+        "Only the data field supports little-endian encoding, which is required for uint128 token amounts"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Storing trade parameters in args provides three advantages over storing them in data. First, the lock script reads its own args cheaply — no extra CKB-VM syscalls are needed during validation. Second, the args are committed when the cell is created and cannot be modified, preventing an attacker from changing the trade terms after an order is posted (this would be a bait-and-switch attack). Third, any indexer or wallet can decode the order parameters from the args without executing any code — just reading and parsing the cell's lock script args reveals the entire order book. These properties together make args the natural location for immutable, efficiently-accessible trade parameters."
+    },
+    {
+      "id": 5,
+      "question": "How does a maker cancel an order and reclaim their CKB?",
+      "options": [
+        "The maker calls a cancel() function on the DEX contract, which returns their CKB after a 24-hour waiting period",
+        "The maker broadcasts a signed message to the DEX's off-chain server, which manually processes the cancellation",
+        "The order cell's lock script has two unlock paths: a fill path (satisfy exchange conditions) and a cancel path (maker provides SECP256K1 signature), so the maker can spend the order cell by signing a transaction that returns the CKB to their address",
+        "The maker must provide 50% of the order's CKB as a cancellation fee, which goes to the miners"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The DEX lock script implements dual-path authorization. The fill path allows anyone to unlock the order cell by satisfying the exchange conditions (sending the required tokens to the maker). The cancel path allows the maker to unlock the cell by providing a valid SECP256K1 signature — exactly like spending a normal cell. The maker's blake160 hash is stored in the lock args, so the script knows whose signature to verify. A cancel transaction has the order cell as its only input and the maker's reclaimed CKB cell as its only output. No exchange conditions need to be met — the maker's signature alone authorizes the cancellation. This design requires no special cancel protocol; it reuses standard CKB signature verification."
+    },
+    {
+      "id": 6,
+      "question": "How does CKB's order cell DEX provide front-running resistance compared to Ethereum DEXes?",
+      "options": [
+        "CKB encrypts all pending transactions in the mempool so miners cannot see them",
+        "CKB uses a private mempool where only approved validators can see pending transactions",
+        "Each order cell specifies exact exchange terms that the lock script enforces; front-runners can only fill the order at the maker's specified price (gaining no advantage), and a failed fill attempt leaves the attacker's tokens intact",
+        "CKB uses a FIFO mempool that processes transactions strictly in the order they arrive, preventing any reordering"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Front-running resistance comes from the lock script's invariant enforcement. In a CKB DEX order, the exchange rate is fixed in the order cell's args. A front-runner who sees a fill transaction and tries to insert their own fill first simply fills Alice's order at Alice's pre-specified price — they cannot extract a better price than what Alice already agreed to. If they succeed in filling the order first, the original filler's transaction fails because the order cell (UTXO) is already consumed. The failed filler loses only the transaction fee, not their tokens. This is fundamentally different from Ethereum sandwich attacks where MEV bots can manipulate the effective price a user receives by ordering transactions around theirs."
+    },
+    {
+      "id": 7,
+      "question": "What is the key structural difference between an AMM (like Uniswap) and an orderbook DEX on CKB?",
+      "options": [
+        "AMMs are only possible on Ethereum, while orderbook DEXes only work on UTXO chains like CKB",
+        "AMMs use a mathematical formula and a shared liquidity pool to price swaps automatically, while orderbook DEXes use individual order cells where each maker specifies their own price, making orderbooks a natural fit for CKB's per-cell UTXO model",
+        "AMMs are decentralized while orderbook DEXes always require a centralized matching engine server",
+        "AMMs charge zero fees while orderbook DEXes always charge a percentage of each trade"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The fundamental difference is in how prices are determined and how liquidity is structured. AMMs use a formula (x × y = k is the most common) applied to a shared pool: the pool holds two tokens and any swap changes both reserves according to the formula, automatically pricing the trade. Liquidity providers deposit pairs into the pool. Orderbook DEXes have individual makers set specific prices: each order is a cell on-chain representing one maker's offer. CKB's cell model is naturally suited to the orderbook design because each order maps directly to one UTXO (cell) that any taker can consume. AMMs on CKB are possible but require more complex type script logic to maintain the pool invariant across concurrent fills."
+    },
+    {
+      "id": 8,
+      "question": "Why does the order cell lock script need the maker's blake160 hash in its args, given that the fill path doesn't require a signature?",
+      "options": [
+        "The blake160 hash is used to calculate transaction fees proportional to the maker's stake",
+        "The hash identifies which token contract (xUDT) to check for the incoming token payment",
+        "The cancel path verifies the maker's SECP256K1 signature against the blake160 hash, and the fill path directs the incoming token payment to the address derived from that hash",
+        "CKB requires all lock scripts to include the owner's hash as a security measure, even if not used"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The maker's blake160 hash serves two purposes. In the fill path, the lock script checks that one of the transaction's output cells has a lock script corresponding to the maker's blake160 — this ensures the incoming tokens actually go to the maker and not to the taker or anyone else. In the cancel path, the lock script verifies that the transaction is signed with the private key whose public key hashes to this blake160 — this ensures only the maker can cancel their own order. If the maker's hash were not in the args, there would be no way to verify the cancel signature, and anyone could cancel any order. The blake160 is the compact (20-byte) representation of the maker's identity that enables both routing token payments to the correct address and verifying cancel authorization."
+    }
+  ]
+}

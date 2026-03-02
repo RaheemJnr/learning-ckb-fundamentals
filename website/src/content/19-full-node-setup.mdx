@@ -1,0 +1,598 @@
+# Running a CKB Full Node
+
+## Overview
+
+A CKB full node independently downloads and verifies every block and transaction on the blockchain. It does not trust anyone — it cryptographically verifies proof-of-work, script executions, and capacity rules entirely on its own.
+
+Running your own node is the most reliable way to interact with the CKB blockchain. It gives you unrestricted access to all RPC methods, eliminates rate limits, and ensures your application receives accurate, independently-verified chain data.
+
+By the end of this lesson, you will be able to:
+
+- Explain the difference between a full node, light client, and archive node
+- Install and configure a CKB full node on macOS or Linux
+- Understand every important setting in `ckb.toml`
+- Start and monitor sync progress
+- Connect your application to your local node
+- Understand the P2P network and peer discovery
+- Apply security best practices for node operation
+
+## Prerequisites
+
+- Completion of Lessons 1-18
+- A machine meeting the hardware requirements below
+- Basic comfort with terminal commands
+
+## Concepts
+
+### Full Node vs Light Client vs Archive Node
+
+CKB supports three node types with different trade-offs:
+
+| Property | Full Node | Light Client | Archive Node |
+|----------|-----------|-------------|-------------|
+| Verifies all blocks | Yes | No (headers only) | Yes |
+| Stores full history | Yes (default) | No | Yes (all history) |
+| Runs scripts | Yes | No | Yes |
+| Storage (mainnet) | ~500 GB | ~100 MB | 1+ TB |
+| Initial sync time | 12-48 hours | Minutes | Days |
+| Trust requirement | None | Bootstrap peers | None |
+| RPC availability | All methods | Limited | All methods |
+| Use case | Production apps, wallets | Mobile apps, light wallets | Block explorers |
+
+**Full node** — Downloads and validates every block body and executes every script. Maintains the complete UTXO set. This is the standard node type for production use.
+
+**Light client** — Downloads only block headers and uses Merkle proofs to verify specific cells and transactions without downloading all block data. Suitable for resource-constrained environments like mobile devices. Covered in Lesson 20.
+
+**Archive node** — Like a full node but retains all historical state. Most full nodes prune some old data to save space. Archive nodes keep everything, making them suitable for block explorers and historical analytics tools.
+
+### Why Run Your Own Node?
+
+**Independence and trust**: Public RPC endpoints are convenient but you are trusting the operator to serve you accurate data. A full node independently verifies everything — if a public endpoint tries to deceive you, your own node will reject the fraudulent data.
+
+**Rate limits**: Public endpoints throttle requests. For applications making many calls — wallet backends, block indexers, monitoring tools — a local node is essential.
+
+**Full RPC access**: Net methods (`local_node_info`, `get_peers`), admin methods (`clear_tx_pool`), and WebSocket subscriptions are disabled or restricted on public endpoints. A local node gives full access.
+
+**Privacy**: Every RPC call to a public endpoint reveals your addresses and query patterns. Running your own node keeps this information local.
+
+**Reliability**: Your application works even during public endpoint outages.
+
+## Hardware Requirements and Recommendations
+
+CKB is designed to run on consumer hardware.
+
+### Minimum (Testnet)
+- CPU: 2 cores, x86_64 or ARM64
+- RAM: 4 GB
+- Storage: 100 GB SSD
+- Network: 5 Mbps stable broadband
+
+### Minimum (Mainnet)
+- CPU: 4 cores
+- RAM: 8 GB
+- Storage: 500 GB SSD (NVMe strongly recommended for faster sync)
+- Network: 10 Mbps stable broadband
+
+### Recommended (Mainnet Production)
+- CPU: 8+ cores
+- RAM: 16 GB
+- Storage: 1 TB NVMe SSD
+- Network: 50+ Mbps
+
+**Storage note**: The CKB blockchain grows over time. As of 2025, mainnet requires approximately 500 GB for a full node. Plan for 1 TB or more for long-term operation. NVMe SSDs dramatically speed up initial sync compared to SATA SSDs or HDDs — initial sync on an HDD can take 10x longer.
+
+**RAM note**: The node uses RAM for in-memory caches (block cache, cell cache, script cache). More RAM allows larger caches and faster transaction processing.
+
+## Installing CKB
+
+### From Binary Releases (Recommended)
+
+Download the latest release from https://github.com/nervosnetwork/ckb/releases
+
+```bash
+# Example: macOS ARM64
+CKB_VERSION="0.119.0"
+curl -LO "https://github.com/nervosnetwork/ckb/releases/download/v${CKB_VERSION}/ckb_v${CKB_VERSION}_aarch64-apple-darwin.tar.gz"
+
+# IMPORTANT: verify the checksum before running
+curl -LO "https://github.com/nervosnetwork/ckb/releases/download/v${CKB_VERSION}/ckb_v${CKB_VERSION}_aarch64-apple-darwin.tar.gz.sha256"
+sha256sum --check "ckb_v${CKB_VERSION}_aarch64-apple-darwin.tar.gz.sha256"
+
+# Extract
+tar -xzf "ckb_v${CKB_VERSION}_aarch64-apple-darwin.tar.gz"
+export PATH="$PATH:$(pwd)/ckb_v${CKB_VERSION}_aarch64-apple-darwin"
+```
+
+Platform strings:
+- `aarch64-apple-darwin` — macOS Apple Silicon (M1/M2/M3)
+- `x86_64-apple-darwin` — macOS Intel
+- `x86_64-unknown-linux-gnu` — Linux x86_64
+- `aarch64-unknown-linux-gnu` — Linux ARM64
+
+### Building from Source
+
+If you want to audit the code or use a development build:
+
+```bash
+# Requires Rust (rustup.rs)
+git clone https://github.com/nervosnetwork/ckb.git
+cd ckb
+git checkout v0.119.0  # Use a release tag for stability
+cargo build --release
+# Binary is at: target/release/ckb
+```
+
+Building from source takes 10-30 minutes depending on your hardware.
+
+### Using Package Managers
+
+On macOS with Homebrew (may not always be up to date):
+```bash
+brew install ckb
+```
+
+## ckb.toml Configuration Walkthrough
+
+After running `ckb init --chain testnet`, you get a `ckb.toml` configuration file. Here are the most important settings:
+
+### [rpc] — JSON-RPC server
+
+```toml
+[rpc]
+# The address the HTTP RPC server listens on.
+# Default: "127.0.0.1:8114" (localhost only, more secure)
+# Use "0.0.0.0:8114" to accept remote connections (opens to your network)
+listen_address = "127.0.0.1:8114"
+
+# TCP transport (alternative to HTTP, useful for batch requests)
+tcp_listen_address = "127.0.0.1:18114"
+
+# WebSocket transport (required for subscribe/unsubscribe methods)
+# ws_listen_address = "127.0.0.1:28114"
+
+# Which RPC modules to enable. Remove modules you do not need.
+# "Debug" should be removed on production/public nodes.
+modules = [
+  "Net", "Pool", "Miner", "Chain", "Stats",
+  "Subscription", "Experiment", "Debug", "Indexer"
+]
+
+# Maximum number of simultaneous RPC connections
+max_request_body_size = 10_000_000
+
+# Enable batch JSON-RPC requests
+enable_deprecated_rpc = false
+```
+
+### [network] — P2P network
+
+```toml
+[network]
+# TCP addresses for the P2P network (not the same as RPC)
+listen_addresses = ["/ip4/0.0.0.0/tcp/8115"]
+
+# Maximum total peer connections
+max_peers = 8
+
+# Maximum outbound (we initiate) peer connections
+max_outbound_peers = 8
+
+# Bootstrap nodes are pre-configured by ckb init.
+# You can add more well-known peers here.
+# bootnodes = ["/ip4/47.111.169.36/tcp/8111/p2p/QmNQ4..."]
+
+# Whitelist peers (always allow connection)
+# whitelist_peers = [...]
+
+# Discovery timeout (seconds)
+# discovery_local_address = true
+```
+
+### [store] — Data storage
+
+```toml
+[store]
+# Path to the data directory (relative to ckb.toml)
+path = "data"
+
+# In-memory cache sizes (in cells / items)
+# Larger caches improve read performance but use more RAM
+block_cache_size = 268  # Number of blocks to cache in memory
+cell_cache_size = 128   # Number of cells to cache in memory
+
+# Header cache for quick header lookups
+header_cache_size = 4096
+```
+
+### [tx_pool] — Transaction pool
+
+```toml
+[tx_pool]
+# Minimum fee rate to accept transactions (shannons per 1000 bytes)
+# Higher values reduce spam but may exclude legitimate low-fee transactions
+min_fee_rate = 1000
+
+# Maximum memory for the transaction pool (bytes)
+max_tx_pool_size = 180_000_000  # 180 MB
+
+# Maximum number of transactions in pool
+max_tx_verify_cycles = 70_000_000_000
+
+# Maximum ancestors for a transaction (chain depth in mempool)
+max_ancestors_count = 25
+```
+
+### [logger] — Logging configuration
+
+```toml
+[logger]
+# Log level: error | warn | info | debug | trace
+filter = "info"
+
+# Log to a file instead of (or in addition to) stdout
+# file = "logs/run.log"
+
+# Whether to also print to stdout when logging to file
+log_to_stdout = true
+log_to_file = false
+```
+
+## Initializing the Node
+
+The `ckb init` command creates configuration files for a specific chain:
+
+```bash
+# Create a directory for node data
+mkdir ~/ckb-testnet && cd ~/ckb-testnet
+
+# Initialize for testnet
+ckb init --chain testnet
+
+# Files created:
+# ckb.toml      — main configuration
+# ckb-miner.toml — miner configuration (for devnet only)
+# specs/         — chain specification (genesis block definition)
+```
+
+Chain options:
+- `testnet` — Pudge testnet (long-running public test network, recommended for learning)
+- `mainnet` — the real CKB blockchain
+- `dev` — local development chain (no PoW, instant blocks)
+
+## Starting and Monitoring Sync Progress
+
+```bash
+# Start the node (in your initialized directory)
+ckb run
+
+# Or in background with logging
+ckb run >> ckb.log 2>&1 &
+```
+
+Watch for these log messages:
+```
+CKB INFO CKB v0.119.0
+CKB INFO Started P2P discovery listener on /ip4/0.0.0.0/tcp/8115
+CKB INFO Started RPC server at http://127.0.0.1:8114
+CKB INFO CKB Sync started
+```
+
+Check sync progress via RPC:
+
+```bash
+# Get sync state (shows headers/blocks synced vs total known)
+curl -s -X POST http://localhost:8114 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"sync_state","params":[]}' \
+  | python3 -m json.tool
+```
+
+The `sync_state` response includes:
+- `headers`: block headers downloaded and verified
+- `blocks`: full blocks downloaded and validated
+- `best_known_header_number`: highest header number seen from any peer
+- `best_known_block_number`: highest fully-validated block number seen from peers
+
+The node is fully synced when `blocks` equals `best_known_block_number`.
+
+```bash
+# Quick check: is_initial_block_download
+curl -s -X POST http://localhost:8114 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"get_blockchain_info","params":[]}' \
+  | python3 -c 'import sys,json; r=json.load(sys.stdin)["result"]; print("Syncing:", r["is_initial_block_download"])'
+```
+
+## The P2P Network: Bootstrap Nodes and Peer Discovery
+
+When you first start a CKB node, it connects to bootstrap nodes hardcoded in the chain spec. From there, it uses a peer discovery protocol to find more nodes.
+
+```
+Your Node
+  |
+  v
+Bootstrap Node 1 ---> discovers --> Peer A, Peer B, Peer C
+Bootstrap Node 2 ---> discovers --> Peer D, Peer E
+Bootstrap Node 3
+  |
+  +---> After discovery, your node maintains
+        8+ peer connections from across the network
+```
+
+The discovery protocol is based on a Kademlia DHT. Nodes announce their addresses to nearby peers, and new nodes can find the network without knowing all existing participants in advance.
+
+Manually add a peer:
+```bash
+curl -X POST http://localhost:8114 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"add_node","params":["Qm...","<addr>"]}'
+```
+
+Check connected peers:
+```bash
+curl -s -X POST http://localhost:8114 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"get_peers","params":[]}' \
+  | python3 -c 'import sys,json; peers=json.load(sys.stdin)["result"]; print(f"Connected to {len(peers)} peers")'
+```
+
+A healthy node typically has 6-12 peers. Fewer than 3 peers may indicate network configuration issues (firewall blocking port 8115).
+
+## Pruned vs Full Archive Data
+
+By default, CKB keeps all historical block data. This is called "archive mode." For most applications, you do not need to serve historical blocks to other peers — you can use pruned mode to reduce storage.
+
+```toml
+# In ckb.toml — enable pruned mode
+[store]
+# Reduce block cache to minimum
+block_cache_size = 0
+```
+
+| Mode | Pros | Cons |
+|------|------|------|
+| Archive | Full historical data, can serve any block to peers | Highest storage requirement |
+| Pruned | Less storage, faster reads for recent data | Cannot serve old blocks to syncing peers |
+
+Note: Pruned mode still validates the full chain. The node simply does not retain old block bodies after the UTXO set is updated. You can still query current cell states, but historical transaction data from old blocks is not available locally.
+
+## Indexer Configuration for Cell Queries
+
+The CKB indexer is built into the node and maintains an index of cells organized by lock script and type script. It is required for wallet balance queries and DApp cell lookups.
+
+```toml
+# The indexer is enabled automatically in CKB 0.101+
+# No explicit configuration needed in modern releases.
+
+# If using an older release, ensure the Indexer module is in the modules list:
+[rpc]
+modules = ["Chain", "Pool", "Indexer", ...]
+```
+
+When you enable the indexer on an existing node, it processes all historical blocks starting from genesis. This takes proportional time to the chain length — expect 1-6 hours on testnet, longer on mainnet.
+
+Check indexer progress:
+```bash
+# Compare indexer tip vs chain tip
+CHAIN_TIP=$(curl -s -X POST http://localhost:8114 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"get_tip_block_number","params":[]}' \
+  | python3 -c 'import sys,json; print(int(json.load(sys.stdin)["result"],16))')
+
+INDEXER_TIP=$(curl -s -X POST http://localhost:8114 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"get_indexer_tip","params":[]}' \
+  | python3 -c 'import sys,json; print(int(json.load(sys.stdin)["result"]["block_number"],16))')
+
+echo "Chain tip: $CHAIN_TIP, Indexer tip: $INDEXER_TIP, Behind: $((CHAIN_TIP - INDEXER_TIP)) blocks"
+```
+
+## Mainnet vs Testnet vs Devnet
+
+| | Mainnet | Testnet (Pudge) | Devnet |
+|--|---------|----------------|--------|
+| CKB has real value | Yes | No | No |
+| Sync time | 12-48 hours | 1-4 hours | Instant |
+| Block time | ~10 seconds | ~10 seconds | Configurable |
+| Public peers | Yes | Yes | No (local only) |
+| Use case | Production | Learning, staging | Development |
+| `ckb init --chain` | `mainnet` | `testnet` | `dev` |
+
+**Testnet** is strongly recommended for all learning and development. It behaves identically to mainnet in terms of RPC API and chain rules, but CKB has no real-world value.
+
+## Using OffCKB for Local Development
+
+OffCKB is a developer tool that provides an instant-on local devnet without downloading the CKB binary or syncing:
+
+```bash
+# Install and start
+npx @offckb/cli@latest start
+```
+
+OffCKB provides:
+- A CKB node running locally at `http://localhost:8114`
+- Instant block production (no real PoW — blocks created on demand or every 1 second)
+- Pre-funded test accounts with plenty of CKB
+- All system scripts pre-deployed (secp256k1, omnilock, xUDT, Spore, etc.)
+- A visual block explorer at `http://localhost:9000`
+
+Use OffCKB when:
+- Rapidly iterating on smart contract logic
+- Writing tests that need deterministic behavior
+- Learning CKB without waiting for sync
+
+Use a testnet or mainnet node when:
+- Your application needs to interact with real on-chain state
+- You want to test with real transaction propagation timing
+- You are preparing for mainnet deployment
+
+## Connecting Your DApp to Your Local Node
+
+Once your local node is running, point your application at it:
+
+```typescript
+import { ccc } from "@ckb-ccc/core";
+
+// Replace the public endpoint with your local node
+const client = new ccc.ClientTestnet("http://localhost:8114");
+
+// All SDK methods work identically
+const balance = await client.getBalance(address);
+await tx.completeInputsByCapacity(signer);
+```
+
+For the raw RPC client from Lesson 18:
+```typescript
+const rpcClient = new CkbRpcClient("http://localhost:8114");
+
+// Now you can use methods unavailable on public endpoints:
+const peers = await rpcClient.getPeers();
+const nodeInfo = await rpcClient.getLocalNodeInfo();
+```
+
+Environment variable pattern for switching between local and public:
+```typescript
+const RPC_URL = process.env.CKB_RPC_URL ?? "http://localhost:8114";
+const client = new CkbRpcClient(RPC_URL);
+```
+
+## Node Security Best Practices
+
+**1. Restrict RPC to localhost**
+
+By default `ckb init` sets the RPC to listen on `127.0.0.1:8114`. Only change this to `0.0.0.0:8114` if you specifically need remote access, and then use a firewall to restrict which IPs can reach the port.
+
+```toml
+# Secure (default) — only local processes can reach the RPC
+listen_address = "127.0.0.1:8114"
+
+# If you need remote access, restrict with a firewall:
+# iptables -A INPUT -p tcp --dport 8114 -s <your-ip> -j ACCEPT
+# iptables -A INPUT -p tcp --dport 8114 -j DROP
+```
+
+**2. Remove Debug module in production**
+
+The Debug module exposes methods that reveal internal node state. Remove it from the modules list for any publicly-accessible node:
+
+```toml
+[rpc]
+modules = ["Net", "Pool", "Miner", "Chain", "Stats", "Subscription", "Indexer"]
+# Note: Debug is omitted
+```
+
+**3. Keep CKB updated**
+
+Security vulnerabilities are patched regularly. Subscribe to release notifications on GitHub and update promptly when security-relevant releases are published.
+
+**4. Use a dedicated user account**
+
+Do not run the node as root. Create a dedicated system user:
+```bash
+useradd -r -s /bin/false ckb
+chown -R ckb:ckb /var/lib/ckb
+sudo -u ckb ckb run
+```
+
+**5. Verify binary checksums**
+
+Always verify the SHA256 checksum of downloaded CKB binaries against the official checksums published on the GitHub releases page.
+
+**6. P2P port exposure**
+
+Port 8115 (P2P) should be accessible from the internet for full peer connectivity. This is safe — the P2P protocol only accepts valid signed messages and has no administrative capabilities.
+
+## Step-by-Step Tutorial
+
+### Step 1: Download and install CKB
+
+```bash
+# Visit https://github.com/nervosnetwork/ckb/releases
+# Download the binary for your platform
+# Verify the checksum
+# Extract and add to PATH
+ckb --version  # Confirm installation
+```
+
+### Step 2: Initialize testnet node
+
+```bash
+mkdir ~/ckb-testnet && cd ~/ckb-testnet
+ckb init --chain testnet
+```
+
+### Step 3: Review configuration
+
+Open `ckb.toml` and verify:
+- `listen_address = "127.0.0.1:8114"` (or `0.0.0.0:8114` if needed)
+- The `modules` list includes `"Indexer"` for cell queries
+- The data path points to where you have enough storage
+
+### Step 4: Start the node
+
+```bash
+ckb run
+```
+
+Watch for the P2P listener, RPC server, and sync start log messages.
+
+### Step 5: Monitor sync progress
+
+```bash
+# In a new terminal, run this lesson's monitor:
+cd /path/to/lessons/19-full-node-setup
+npm install && npm start
+```
+
+Or check directly via curl:
+```bash
+curl -s -X POST http://localhost:8114 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"get_blockchain_info","params":[]}' \
+  | python3 -c 'import sys,json; r=json.load(sys.stdin)["result"]; print(r["chain"], "syncing:", r["is_initial_block_download"])'
+```
+
+### Step 6: Wait for full sync
+
+Testnet sync takes 1-4 hours. You will see log messages like:
+```
+INFO best=1234567 ... tip=5678901
+```
+When `best` equals the network tip, the node is fully synced.
+
+### Step 7: Confirm indexer is caught up
+
+```bash
+curl -s -X POST http://localhost:8114 \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"get_indexer_tip","params":[]}' \
+  | python3 -c 'import sys,json; print(int(json.load(sys.stdin)["result"]["block_number"],16))'
+```
+
+The indexer tip should match the chain tip within a few blocks.
+
+### Step 8: Connect your application
+
+```typescript
+const client = new CkbRpcClient("http://localhost:8114");
+const tip = await client.getTipHeader();
+console.log("Local node block:", BigInt(tip.number).toLocaleString());
+```
+
+## Summary
+
+Running a CKB full node is the foundation of trustless blockchain interaction. You have learned:
+
+- **Node types**: Full node (independent verification), light client (header-only), archive node (full history)
+- **Why run your own node**: no rate limits, full RPC access, privacy, trust, reliability
+- **Hardware**: 4+ cores, 8 GB RAM, 500 GB+ NVMe SSD recommended for mainnet
+- **Installation**: Download binary from GitHub releases, verify checksum, initialize with `ckb init --chain`
+- **ckb.toml**: RPC listen address, P2P network settings, storage path, tx_pool limits, indexer
+- **Sync phases**: Header sync (fast, downloads headers), block sync (slower, validates full blocks and scripts)
+- **P2P network**: Bootstrap nodes → peer discovery → 6-12 active peers
+- **Pruned vs archive**: Pruned mode saves space, archive mode enables full historical queries
+- **Indexer**: Required for cell queries; needs to catch up after enabling
+- **Mainnet/Testnet/Devnet**: Testnet for learning, OffCKB for instant development, mainnet for production
+- **Security**: Restrict RPC to localhost, remove Debug module, keep updated, verify checksums
+
+In **Lesson 20**, you will build a light client application that syncs in minutes instead of hours by only downloading block headers and using cryptographic proofs to verify specific cells without trusting a server.

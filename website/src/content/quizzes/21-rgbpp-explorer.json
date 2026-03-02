@@ -1,0 +1,101 @@
+{
+  "lessonId": 21,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What does 'isomorphic binding' mean in the context of RGB++?",
+      "options": [
+        "RGB++ assets are automatically bridged between Bitcoin and Ethereum using an isomorphic smart contract",
+        "Each Bitcoin UTXO maps to exactly one CKB Cell in a one-to-one cryptographic relationship, where both represent the same asset and neither can change without the other",
+        "RGB++ creates identical (isomorphic) copies of Bitcoin transactions on CKB for redundancy",
+        "Isomorphic binding means the RGB++ protocol uses the same hash function on both Bitcoin and CKB"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Isomorphic means 'same structure.' Bitcoin and CKB both use UTXO-like models where transactions consume old outputs and create new outputs. RGB++ exploits this structural similarity by creating a one-to-one binding: for each Bitcoin UTXO holding an RGB++ asset, there is exactly one CKB Cell that holds the asset state, encoded in the cell's RGB++ lock script args. The two are cryptographically linked — spending the Bitcoin UTXO requires updating the CKB Cell, and the CKB Cell cannot be updated without a corresponding Bitcoin transaction. They are two representations of the same asset."
+    },
+    {
+      "id": 2,
+      "question": "What information is encoded in the args field of an RGB++ lock script?",
+      "options": [
+        "The Bitcoin block hash and block height where the UTXO was confirmed",
+        "The owner's Bitcoin public key and a signature authorizing the current CKB state",
+        "The bound Bitcoin UTXO: 32 bytes for the txid (reversed byte order) plus 4 bytes for the output index as uint32 little-endian",
+        "The total supply of the RGB++ token and the minting policy parameters"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The RGB++ lock script args are exactly 36 bytes and encode one Bitcoin UTXO. The first 32 bytes are the Bitcoin transaction ID stored in Bitcoin's internal byte order (reversed from the human-readable display format). The last 4 bytes are the output index (vout) encoded as a uint32 in little-endian format. These args are immutable once a cell is created — they encode which specific Bitcoin UTXO this cell is bound to. When the cell is transferred to a new owner (binding it to a new UTXO), the entire cell is consumed and a new cell is created with new args encoding the new UTXO."
+    },
+    {
+      "id": 3,
+      "question": "Why does an RGB++ transfer require transactions on BOTH Bitcoin and CKB?",
+      "options": [
+        "It's a regulatory requirement to ensure both blockchains have records of all asset movements",
+        "The Bitcoin transaction spends the binding UTXO (establishing new ownership) and commits to the CKB transaction via OP_RETURN, while the CKB transaction updates the cell state; the RGB++ lock rejects CKB transactions that lack matching Bitcoin transactions",
+        "Two separate transactions are needed because Bitcoin and CKB use different signature schemes that cannot be combined",
+        "The dual transaction requirement is optional — RGB++ transfers can be done with just a CKB transaction if the user prefers"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Dual-chain validation is the core security mechanism of RGB++. On Bitcoin: the sender spends UTXO_A (releasing old ownership) and creates UTXO_B (establishing new ownership), with an OP_RETURN output that contains a cryptographic commitment to the CKB transaction. On CKB: the cell with args encoding UTXO_A is consumed, and a new cell with args encoding UTXO_B is created. The RGB++ lock script verifies the Bitcoin transaction actually occurred AND correctly commits to this CKB transaction. Without the Bitcoin side, the CKB lock script rejects the transaction. Without the CKB side, the asset state is not updated. Both must succeed for the transfer to be valid."
+    },
+    {
+      "id": 4,
+      "question": "What is the 'leap' operation in RGB++?",
+      "options": [
+        "A security protocol where RGB++ assets 'leap' over Bitcoin confirmation delays to achieve instant finality",
+        "An operation that moves an RGB++ asset from Bitcoin-bound ownership (controlled by a Bitcoin UTXO) to CKB-native ownership (controlled by a CKB lock script), or vice versa",
+        "A pricing mechanism that calculates the 'leap' from Bitcoin's price to CKB's price for fair exchange",
+        "A development tool that helps developers 'leap' between the Bitcoin testnet and CKB testnet"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The leap operation changes the ownership model of an RGB++ asset. In the Bitcoin-bound state, the asset is controlled by whoever controls a specific Bitcoin UTXO, and every transfer requires both Bitcoin and CKB transactions. After leaping to CKB-native, the asset is held in a regular CKB cell with a standard lock (like secp256k1-blake160), and transfers only require CKB transactions. The CKB-native state enables participation in CKB DeFi protocols and Fiber Network payment channels without any Bitcoin transaction overhead. The leap can also go in reverse — from CKB-native back to Bitcoin-bound — restoring Bitcoin PoW security as the settlement layer."
+    },
+    {
+      "id": 5,
+      "question": "How is RGB++ fundamentally different from traditional cross-chain bridges like WBTC?",
+      "options": [
+        "RGB++ is faster because it uses a federated multisig with fewer signers than WBTC requires",
+        "There is no fundamental difference — both RGB++ and WBTC use custodians, but RGB++ uses CKB validators instead of Ethereum validators",
+        "RGB++ requires NO custodian: assets are controlled through cryptographic bindings between Bitcoin UTXOs and CKB cells, with no central party holding funds or minting wrapped tokens",
+        "RGB++ is safer than bridges only for small amounts; for large amounts the security is equivalent"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The fundamental difference is the complete absence of a custodian. WBTC and similar bridges lock BTC with a custodian (a company, multisig federation, or smart contract), then mint a new ERC-20 token on the destination chain. Users must trust the custodian not to steal the BTC, not to be hacked, and not to be legally compelled to freeze assets. This trust assumption has been violated repeatedly — cross-chain bridge hacks have cost billions. RGB++ has no custodian and no wrapped token. The asset on CKB IS the asset, not a representation. The ownership is enforced by the RGB++ lock script verifying cryptographic proofs on both chains. There is no pool of locked funds to steal."
+    },
+    {
+      "id": 6,
+      "question": "What role does the Fiber Network play in the RGB++ ecosystem?",
+      "options": [
+        "The Fiber Network is a decentralized oracle service that provides Bitcoin price data to RGB++ smart contracts on CKB",
+        "The Fiber Network is CKB's Layer 2 payment channel network that enables fast, cheap transfers of CKB-native RGB++ assets after they have been leaped from Bitcoin-bound state",
+        "The Fiber Network connects RGB++ asset holders directly with Bitcoin miners to speed up transaction confirmation",
+        "The Fiber Network is the name for the set of full nodes that validate RGB++ dual-chain transactions"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The Fiber Network is CKB's Layer 2 payment channel system, analogous to Bitcoin's Lightning Network. Once RGB++ assets are leaped to CKB-native state (regular CKB cells), they can enter Fiber Network payment channels. This enables sub-second finality, micropayments, and high-frequency trading without paying on-chain fees for every transaction. Channel disputes are settled on CKB L1. The complete stack is: Bitcoin L1 (security) → RGB++ (isomorphic binding + CKB smart contracts) → Fiber Network (fast payment channels). Assets only need to be on-chain for opening/closing channels; all intermediate payments are instant and off-chain."
+    },
+    {
+      "id": 7,
+      "question": "Why was CKB chosen as the execution layer for RGB++ instead of Ethereum or another EVM chain?",
+      "options": [
+        "CKB was chosen purely because it has lower transaction fees than Ethereum",
+        "CKB's UTXO-like Cell model is isomorphically compatible with Bitcoin's UTXO model, CKB uses proof-of-work (same security model as Bitcoin), and CKB-VM provides Turing-complete programmability",
+        "CKB was chosen because it is the fastest blockchain, allowing RGB++ transactions to confirm before Bitcoin transactions",
+        "The Nervos Foundation created both CKB and RGB++, so CKB was chosen for business reasons"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB was chosen for three technically substantive reasons. First, the Cell model maps isomorphically to Bitcoin's UTXO model — both use discrete units that are created and destroyed in transactions, unlike Ethereum's account model which has continuous balances and a fundamentally different structure. This isomorphism is what makes the one-to-one binding possible. Second, CKB uses NC-Max (proof-of-work), meaning its economic security model aligns with Bitcoin's rather than being a completely different security assumption (proof-of-stake). Third, CKB-VM is Turing-complete, enabling the complex smart contract logic (lock scripts, type scripts) that Bitcoin Script cannot express."
+    },
+    {
+      "id": 8,
+      "question": "If you want to find all live RGB++ cells on CKB for a specific Bitcoin UTXO (txid: abc123..., vout: 1), what is the correct approach?",
+      "options": [
+        "Query the Bitcoin blockchain for the OP_RETURN in the transaction that created the UTXO, then use that hash to look up the CKB transaction",
+        "Compute the RGB++ lock args from the UTXO (reverse the txid bytes + encode vout as uint32 LE), then query CKB for cells with exactly those args in the RGB++ lock script",
+        "Look up the UTXO on a Bitcoin block explorer, which will automatically show linked CKB cells",
+        "Query the Fiber Network's routing table, which maintains a mapping from Bitcoin UTXOs to CKB cells"
+      ],
+      "correctAnswer": 1,
+      "explanation": "To find the CKB cell for a specific Bitcoin UTXO, you compute the expected RGB++ lock script args and query CKB directly. The args computation: reverse the txid bytes (from display order to Bitcoin's internal byte order, 32 bytes), concatenate with the vout encoded as uint32 little-endian (4 bytes), giving 36 bytes total. Then query CKB's cell index for a live cell with the RGB++ lock code_hash and exactly those args (using scriptSearchMode: 'exact'). If a live cell exists with those args, that is the current CKB state for that Bitcoin UTXO. If no live cell exists, the UTXO has been spent (its corresponding cell was also consumed in the matching CKB transaction)."
+    }
+  ]
+}

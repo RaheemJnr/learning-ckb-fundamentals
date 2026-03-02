@@ -1,0 +1,263 @@
+# Building a Token DEX on CKB
+
+## Overview
+
+A decentralized exchange (DEX) lets two parties trade assets without trusting each other or a central intermediary. On CKB, we can build a remarkably elegant DEX using the **order cell pattern** — a design that exploits CKB's UTXO model to guarantee atomic swaps at the consensus layer.
+
+By the end of this lesson, you will understand how to build a trustless exchange using CKB's cell model, why UTXO-based DEXes have natural front-running resistance, and how real projects like UTXOSwap implement these ideas in production.
+
+## How DEXes Work: UTXO vs Account Model
+
+The design of a DEX depends heavily on the underlying blockchain's state model.
+
+### Ethereum-Style DEXes (Account Model)
+
+On Ethereum, a DEX is a smart contract account that holds all the liquidity and order state. Users interact with the contract by calling functions like `placeOrder()`, `fill()`, and `cancel()`. The contract stores the current state of all orders in its own storage slots.
+
+This design has two structural weaknesses. First, the contract is a central point of failure: if the contract code has a bug or its admin keys are compromised, all user funds are at risk. Second, every pending transaction is visible in the public mempool before it is included in a block. MEV (Maximal Extractable Value) bots monitor the mempool and can insert their own transactions ahead of yours with higher gas fees, extracting value from your trade before it executes. This is called **front-running**.
+
+### CKB-Style DEXes (UTXO / Cell Model)
+
+On CKB, each open order is a **cell** sitting live on the blockchain. There is no central contract account. The exchange rules are enforced by the order cell's lock script, which runs on CKB-VM during transaction validation.
+
+This gives the CKB DEX design several structural advantages:
+
+**No central contract to hack.** The "contract" is the lock script code, and that code is immutable once deployed. There are no admin keys that can drain funds or pause the exchange.
+
+**All orders are visible.** Any indexer can find all open orders by scanning for cells with the DEX lock script's `code_hash`. The entire order book is transparent and permissionlessly readable.
+
+**Atomic swaps by design.** A fill transaction simultaneously consumes the order cell and pays all parties. There is no intermediate state.
+
+**Natural front-running resistance.** If Eve front-runs Bob's attempt to fill Alice's order, Eve just fills Alice's order at Alice's specified price. Bob's attempt then fails because the order cell is already consumed. Crucially, no one can receive a *worse* price than the order specifies — the lock script enforces the exact terms.
+
+## The Order Cell Pattern
+
+An order cell is a regular CKB cell with a specialized lock script. The lock script encodes the maker's exchange requirements.
+
+### Order Cell Layout
+
+```
+Cell:
+  capacity   : 100_000_000_000 shannons   (1000 CKB the maker is selling)
+
+  lock_script:
+    code_hash : 0xdeadbeef...             (DEX lock script code hash)
+    hash_type : "type"
+    args      : [68 bytes]
+      [0..20]   maker_blake160            (who gets the incoming tokens)
+      [20..52]  token_type_hash           (which xUDT token is expected)
+      [52..68]  min_token_amount          (uint128 little-endian)
+
+  type_script: None                       (order cells have no type script)
+  data       : optional metadata
+```
+
+The same lock script code is shared across all orders. Only the `args` differ. This means one deployed script handles the entire exchange, and users pay less capacity because they reference the code rather than including it.
+
+### Why Encode in Args (Not Data)?
+
+The lock script has free access to its own `args` field — no extra syscalls needed. The args are committed when the cell is created and cannot be modified. Encoding trade parameters in the args means:
+- The lock script reads them cheaply during validation
+- Anyone scanning the chain can reconstruct the order book without executing code
+- The parameters are immutable — no bait-and-switch attacks are possible
+
+## The Order Cell Lifecycle
+
+### Creating an Order (Maker Locks CKB)
+
+Alice wants to sell 1,000 CKB and receive 500 MYTOKEN. She creates an order cell:
+
+```
+Transaction:
+  Inputs:
+    [0] Alice's CKB cell (1200 CKB)
+
+  Outputs:
+    [0] Order cell (1000 CKB, locked with DEX lock)
+          lock.args = alice_hash + mytoken_type_hash + 500_MYTOKEN
+    [1] Alice's change cell (200 CKB - fee)
+```
+
+The order cell's 1,000 CKB is now "locked" by the DEX lock script. Alice's CKB will remain here until someone fills the order or Alice cancels it.
+
+### Filling an Order (Taker Provides Tokens, Receives CKB)
+
+Charlie has 500 MYTOKEN and wants to buy CKB at Alice's price. He builds a fill transaction:
+
+```
+Transaction:
+  Inputs:
+    [0] Alice's order cell (1000 CKB, DEX lock)
+    [1] Charlie's xUDT cell (500 MYTOKEN)
+    [2] Charlie's fee cell
+
+  Outputs:
+    [0] Alice's token cell (500 MYTOKEN → Alice's standard lock)
+    [1] Charlie's CKB cell (1000 CKB → Charlie's standard lock)
+    [2] Fee to miner
+```
+
+The DEX lock script runs when the order cell is consumed. It checks:
+1. Is there an output sending at least 500 MYTOKEN to Alice's address?
+2. Does Charlie receive the CKB from the order cell?
+
+If both conditions are true, the transaction is valid. Alice and Charlie both receive their assets in the same block. There is no intermediate state and no possibility of partial execution.
+
+### Partial Fills and the Remainder Cell
+
+What if Charlie only has 250 MYTOKEN? He can still fill half the order.
+
+**Partial fill math:**
+```
+Total CKB:    1000 CKB
+Total tokens: 500 MYTOKEN
+Charlie provides: 250 MYTOKEN (50%)
+Charlie receives: 250 / 500 × 1000 = 500 CKB (50%)
+```
+
+After a partial fill, a **remainder order cell** is created on-chain:
+
+```
+Remainder cell:
+  capacity : 500 CKB (the unfilled half)
+  lock.args: alice_hash + mytoken_type_hash + 250_MYTOKEN (reduced amount)
+```
+
+The remainder has the same exchange rate as the original order. Any subsequent taker can fill it. The order can be filled by multiple takers across multiple transactions, each creating a smaller and smaller remainder until the order is fully consumed.
+
+### Canceling an Order (Maker Reclaims CKB)
+
+The DEX lock script has two unlock paths:
+
+**Fill path**: Anyone can unlock by satisfying the exchange conditions.
+
+**Cancel path**: The maker can unlock by providing a valid SECP256K1 signature over the transaction.
+
+```
+Transaction:
+  Inputs:
+    [0] Alice's order cell (1000 CKB)
+
+  Outputs:
+    [0] Alice's reclaimed CKB cell (1000 CKB - fee)
+
+  Witness:
+    Alice's signature over the transaction hash
+```
+
+The lock script detects that the fill conditions are not met, falls through to the cancel path, and verifies the signature matches the `maker_blake160` in the args. If valid, Alice reclaims her CKB.
+
+## Type Scripts for DEX Logic
+
+While the lock script handles unlocking conditions (who can spend an order cell), type scripts can enforce additional protocol-level rules:
+
+- **Token type scripts** (xUDT): Verify that token amounts in inputs and outputs are conserved. An xUDT type script running on the taker's token cell ensures the taker cannot create tokens out of nothing.
+- **DEX fee type scripts**: Some DEX designs attach a type script to a fee cell that collects a protocol fee from each trade.
+- **Liquidity pool type scripts**: For AMM-style pools, a type script maintains the `x × y = k` invariant across all swaps.
+
+The combination of a DEX lock (on order cells) and an xUDT type script (on token cells) creates a two-layer enforcement mechanism where both sides of the trade are validated independently.
+
+## Atomic Swap Guarantee
+
+CKB transactions are atomic: either all inputs are consumed and all outputs are created, or nothing happens. This makes the DEX's correctness a property of the transaction model itself, not something the developer has to carefully program.
+
+There is no scenario where:
+- Alice's CKB leaves the order cell but her tokens never arrive
+- Charlie's tokens are consumed but he receives no CKB
+- The order cell disappears without compensating anyone
+
+This guarantee holds even if Alice, Charlie, and the miners are all different actors with no reason to trust each other. The consensus rules enforce it.
+
+## Front-Running Resistance
+
+Consider a scenario where Bob is watching the mempool for good orders to fill. He sees Alice's order and broadcasts his own fill transaction. Can Eve (a front-runner) extract value from this situation?
+
+On Ethereum, Eve can insert a transaction between Alice's order creation and Bob's fill, buying the tokens at Alice's low price, then selling them back to Bob at a higher price. This is sandwich attack MEV.
+
+On CKB:
+- Alice's order cell specifies exactly what Alice will accept. Eve cannot change the terms.
+- If Eve fills Alice's order first, she pays Alice's specified price. There is no "better" price for Eve to extract.
+- Bob's fill attempt then fails because the order cell is already consumed (UTXOs can only be spent once).
+- Bob still has his tokens. He can try a different order.
+
+The worst outcome in the CKB model is that Bob's transaction fails. He loses the (small) transaction fee but not his tokens. On Ethereum, Bob could receive a meaningfully worse price due to sandwich attacks.
+
+## AMM vs Orderbook DEX: Design Tradeoffs
+
+### Automated Market Maker (AMM)
+
+AMMs like Uniswap use a mathematical formula (`x × y = k`) to price swaps automatically. Liquidity providers deposit token pairs into pools and earn fees from trades.
+
+**Pros**: Always has liquidity, passive income for LPs, simple UX.
+
+**Cons**: Impermanent loss for LPs, price slippage on large trades, harder to implement on CKB (pool state needs complex management across concurrent fills).
+
+### Orderbook DEX
+
+Each order is a cell on-chain. Takers search the order book for prices that meet their needs.
+
+**Pros**: No slippage for limit orders, no impermanent loss, natural fit for CKB's UTXO model, fully transparent.
+
+**Cons**: Requires a counterparty at your exact price, may sit unfilled if the price moves.
+
+CKB's UTXO model is naturally suited to the orderbook design because each open order is a live UTXO (cell) that any taker can consume. The AMM pattern requires more complex state management because the pool invariant must be maintained across many concurrent fills.
+
+## Real-World: UTXOSwap on CKB
+
+**UTXOSwap** is a production DEX on CKB that uses the order cell pattern described in this lesson. It combines:
+
+- A limit order book implemented with order cells and the DEX lock script
+- An AMM liquidity pool for instant swaps at market price
+- A matching engine that routes orders between the book and the AMM
+- CCC (the CKB JavaScript SDK) for wallet integration and transaction building
+
+UTXOSwap demonstrates that this design is not just theoretical — it handles real liquidity and real user trades on mainnet. The order cell pattern scales naturally because each order is an independent cell that can be filled by any taker without coordination.
+
+## Step-by-Step Tutorial
+
+### Step 1: Install Dependencies
+
+```bash
+cd lessons/22-token-dex
+npm install
+```
+
+### Step 2: Run the Demo
+
+```bash
+npm start
+```
+
+The program walks through all DEX concepts with detailed explanations printed to the console.
+
+### Step 3: Explore the Order Cell Structure
+
+Open `src/dex-helpers.ts` and read the `OrderCell` interface and `encodeOrderArgs` function. These show exactly how trade parameters are encoded in the cell's lock script args.
+
+### Step 4: Trace a Full Fill
+
+In `src/index.ts`, find the `demoFullFill` function. Read the comments describing the transaction structure. Notice how inputs and outputs are arranged to satisfy the lock script's conditions.
+
+### Step 5: Understand Partial Fills
+
+Find `demoPartialFill` and trace through the math. Note how the remainder order cell preserves the same exchange rate while reducing both the CKB amount and the required token amount proportionally.
+
+### Step 6: Consider the Security Properties
+
+Find `explainAtomicSwaps` and `compareAmmVsOrderbook`. Think about what security guarantees you get "for free" from the UTXO model versus what you would need to implement explicitly on an account-based chain.
+
+## Summary
+
+The order cell pattern gives CKB a powerful primitive for building DEXes:
+
+- Each open order is a cell locked by the DEX lock script
+- The lock script encodes trade parameters in its args (immutable, cheap to read)
+- Fills are atomic: both parties receive their assets in one transaction
+- Partial fills create remainder cells with the same exchange rate
+- Cancellation uses the maker's signature (a second unlock path in the lock script)
+- Front-running resistance is a structural property of the UTXO model
+- One deployed script serves the entire exchange (shared code, per-order args)
+
+This is DeFi that is trustless by construction, not by convention. The exchange rules are enforced by every node running CKB-VM — not by trusting a team's smart contract code to be correct.
+
+In the next lesson, you will apply these patterns to build a full-stack NFT marketplace combining Spore NFTs, the order cell pattern, CCC wallet integration, and a Next.js frontend.

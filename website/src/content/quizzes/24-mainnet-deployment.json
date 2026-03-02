@@ -1,0 +1,101 @@
+{
+  "lessonId": 24,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What is the correct order of the three-environment deployment pipeline for a CKB protocol, and what is the key goal of each stage?",
+      "options": [
+        "Mainnet → Testnet → Devnet: Deploy to mainnet first to find real issues, then backport fixes to testnet, then document on devnet",
+        "Devnet → Mainnet → Testnet: Deploy quickly to mainnet, then retroactively test on testnet once users find issues",
+        "Devnet → Testnet → Mainnet: Build and unit test locally, validate all transaction types under real network conditions, then deploy with real value only after full verification",
+        "Testnet → Devnet → Mainnet: Start with testnet for realistic conditions, refine on devnet for speed, then finalize on mainnet"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The correct pipeline is devnet → testnet → mainnet, with each stage serving a specific purpose. The devnet is a local node with instant blocks and unlimited test CKB, used for rapid iteration, unit testing, and basic functionality verification. Testnet is a public network with real network conditions (latency, 10-second block times, real mempool dynamics) and testnet CKB from the faucet, used to verify all transaction types under conditions similar to mainnet. Mainnet is only reached after completing a full testnet validation cycle. Each stage serves as a gate: you should not advance to the next stage until the current stage's goals are fully met. Skipping testnet is one of the most common causes of production incidents."
+    },
+    {
+      "id": 2,
+      "question": "What is a script's 'code hash' and why must it be identical across devnet, testnet, and mainnet deployments?",
+      "options": [
+        "The code hash is a sequential ID assigned by the CKB network to each deployed script, and it increments with each new deployment",
+        "The code hash is the blake2b hash of the compiled script binary, and it should be identical across environments because it represents the exact code being run — a mismatch means different code was deployed on different networks",
+        "The code hash is a hash of the deployment transaction, so it will always differ between networks even for the same script binary",
+        "The code hash is set by the developer in the script's configuration file and can be any 32-byte value as long as it is unique"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The code hash is computed as blake2b(binary), where the binary is the compiled RISC-V bytecode of your script. Since the same source code compiled with the same compiler produces the same binary, the code hash should be identical when you deploy the same script to devnet, testnet, and mainnet. If the code hashes differ between environments, it means different binaries were deployed — possibly due to a different compiler version, different compile flags, or a mistake in the deployment process. A code hash mismatch is a critical finding that must be investigated before proceeding to mainnet, because users and developers will be referencing the code hash to verify they are interacting with the correct script."
+    },
+    {
+      "id": 3,
+      "question": "What is the fundamental security difference between hash_type 'data1' and hash_type 'type' for deployed scripts?",
+      "options": [
+        "'data1' is used for lock scripts and 'type' is used for type scripts; there is no security difference between them",
+        "'data1' references the exact binary hash making the script immutable forever, while 'type' references a Type ID that can be updated by whoever controls the deployment cell — 'data1' eliminates admin key risk, 'type' enables upgrades at the cost of centralization",
+        "'data1' is the newer and more secure format, while 'type' is deprecated and should not be used in new deployments",
+        "'data1' allows the script to read transaction data, while 'type' restricts scripts to only reading cell data"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The choice between 'data1' and 'type' is one of the most consequential decisions in CKB deployment. With hash_type 'data1', the cell reference is to the exact blake2b hash of the binary — there is no mechanism to ever change this code. Any cell locked or typed with this script will run that exact code forever. This eliminates admin key risk: no one can upgrade the script to steal funds. With hash_type 'type', the reference is to a Type ID — a special identifier that can be updated by controlling the deployment cell. This enables bug fixes and feature additions but requires maintaining an admin key, which becomes a centralization risk. The CKB default lock script uses 'data1' precisely because its immutability is a security feature: billions of dollars depend on knowing that code cannot change."
+    },
+    {
+      "id": 4,
+      "question": "Why is checking only 'at least 2 signatures are valid' insufficient for a multisig lock script, and what should be checked instead?",
+      "options": [
+        "It is sufficient — verifying 2 valid signatures is the standard for multisig and provides adequate security",
+        "The check should require at least 3 signatures, not 2; the number 2 is never enough for security",
+        "Verifying that 2 signatures are cryptographically valid without checking that the signers are from the authorized set allows an attacker to create 2 valid signatures from their own keys and satisfy the 'at least 2' condition while bypassing the intended authorization",
+        "Lock scripts cannot verify signature counts; signature verification must be done by a separate type script"
+      ],
+      "correctAnswer": 2,
+      "explanation": "This is the 'incomplete authorization' vulnerability. A multisig lock that only checks 'at least 2 signatures present and valid' without verifying that those signatures come from the authorized signers' public keys can be exploited trivially: an attacker generates two key pairs, signs the transaction with both, and provides those two valid signatures. The count check passes even though neither signer was authorized. The correct check is: (1) verify that each signature is cryptographically valid (correct signature algorithm, correct message), AND (2) verify that the public key corresponding to each signature appears in the authorized signers list (usually stored in the lock script's args). Both checks are necessary. This is why the CKB community emphasizes: for each condition you intend to enforce, write a test that violates ONLY that condition and verify the script rejects it."
+    },
+    {
+      "id": 5,
+      "question": "What vulnerability exists in a token type script that correctly enforces conservation during transfers but does not restrict destruction (cells with no outputs)?",
+      "options": [
+        "No vulnerability — allowing tokens to be destroyed is a feature, not a bug; it reduces supply over time",
+        "The type script will panic when it encounters zero outputs, crashing the CKB-VM and rejecting the transaction automatically",
+        "An attacker can burn tokens they do not own by including those token cells as inputs with no token outputs, since the destruction case is unrestricted — this can be used to destroy a competitor's tokens or drain a protocol's token reserves",
+        "The vulnerability only affects the creator of the token; other holders' tokens cannot be destroyed without their private key"
+      ],
+      "correctAnswer": 2,
+      "explanation": "This is the 'missing operation case' vulnerability. Type scripts run for cells in both inputs and outputs. When a type script cell appears in inputs but not in outputs, this is the destruction case. If the destruction case is not explicitly handled and restricted, the type script implicitly allows anyone to destroy cells with that type script attached. For a token type script, this means anyone can include token cells as inputs with no token output cells. The type script runs for the input cells, does not find corresponding output cells to check conservation against, and if it doesn't explicitly handle this case, it may return success. This allows destruction of tokens the attacker does not own. The fix is to explicitly detect the destruction case (input_count > 0 && output_count == 0) and restrict it: either allow it unconditionally (for burn), require the owner's signature, or reject it entirely."
+    },
+    {
+      "id": 6,
+      "question": "Why should a script's admin/upgrade authority use multisig (M-of-N) rather than a single private key?",
+      "options": [
+        "Multisig is required by CKB protocol rules for any admin-capable scripts; single-key admin is technically impossible on CKB",
+        "A single admin key is a single point of failure — if the key is compromised, lost, or the holder becomes unavailable, the attacker or incident has full admin authority; multisig distributes this risk so that M compromised keys out of N total are needed for an attack",
+        "Multisig improves performance by allowing multiple nodes to validate the signature simultaneously",
+        "Single-key admin is only insecure for scripts using hash_type 'type'; scripts using hash_type 'data1' are safe with single-key admin"
+      ],
+      "correctAnswer": 1,
+      "explanation": "A single admin key is a single point of failure in multiple ways. If the key is stolen (device compromise, phishing, physical theft), the attacker has full admin power to upgrade the script, drain funds, or change protocol parameters. If the key is lost (hardware failure, forgotten passphrase), the admin capability is permanently gone — the protocol may become unupgradeable or stranded. If the key holder becomes unavailable (illness, departure from team), no one can perform necessary admin operations. Multisig distributes these risks: a 2-of-3 configuration requires an attacker to compromise 2 separate hardware wallets held by 2 different team members simultaneously, which is dramatically harder. The team can also recover from one key being lost or one holder becoming unavailable, since 2-of-3 still works with any 2 of the 3 signers."
+    },
+    {
+      "id": 7,
+      "question": "What should a monitoring system alert on regarding a deployed script's code cell, and why is this so critical?",
+      "options": [
+        "Alert when the script cell's capacity drops below 100 CKB, indicating the storage is being drained",
+        "Alert when the script cell's outpoint appears as an input in any transaction, because the code cell should never be consumed — if it is consumed, all cells referencing that code hash as a cell dep may fail in future transactions",
+        "Alert when more than 1000 cells are using the script, as this indicates the protocol has become too large and may have scaling issues",
+        "Alert only when the script cell is confirmed in more than 100 blocks, indicating it has been live long enough to be considered stable"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The script deployment cell (the code cell containing your compiled binary) should NEVER be consumed in a transaction. It is a reference cell, not a value cell. If someone spends your deployment cell — which requires controlling whatever key locks it — the cell disappears from the UTXO set. Future transactions that include this cell as a cell dep will fail because the referenced outpoint no longer exists as a live cell. This can break all users of your protocol simultaneously. While this scenario requires controlling the deployment key (which is why key security is critical), monitoring for it provides an early warning and time to respond. CKB nodes expose a transaction subscription API that makes it straightforward to watch for any transaction consuming a specific outpoint."
+    },
+    {
+      "id": 8,
+      "question": "When should a protocol consider migrating from hash_type 'type' (upgradeable) to hash_type 'data1' (immutable), and what does this migration involve for existing users?",
+      "options": [
+        "Migration from 'type' to 'data1' is automatic and happens when the protocol reaches 1 million users",
+        "A mature protocol that has been stable for 6-12 months with no bugs or upgrade needs might migrate to signal trustlessness; however, existing cells using the old 'type' reference still use the old reference — users must voluntarily migrate their cells to reference the new 'data1' deployment if they want the immutability guarantee",
+        "Migration is impossible; the hash_type is set permanently when a cell is first created and cannot be changed",
+        "Migration from 'type' to 'data1' only affects newly created cells; all existing cells automatically switch to immutable behavior without any user action"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Migration from upgradeable to immutable is a deliberate signal of protocol maturity. After 6-12 months of stable operation with no need for upgrades, deploying the same binary as a 'data1' reference creates a version that cannot be changed. However, existing cells referencing the old 'type' hash still reference the old deployment — they do not automatically migrate. Users who want the immutability guarantee must voluntarily move their cells to use the new 'data1' code hash. This typically involves a deprecation period where the protocol team announces the new immutable deployment, provides migration tools or instructions, and maintains both versions for a transition period. Some users may choose to stay on the upgradeable version (preferring the flexibility of bug fixes) while others migrate to the immutable version (preferring the trustlessness guarantee). Both choices are valid."
+    }
+  ]
+}

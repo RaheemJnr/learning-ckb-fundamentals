@@ -1,0 +1,440 @@
+# Light Client Development
+
+## Overview
+
+By the end of this lesson, you will understand:
+
+- What a light client is and why it exists
+- How CKB's FlyClient-based protocol achieves logarithmic header downloads
+- Why NC-Max consensus enables efficient light clients
+- The concrete storage difference between a full node and a light client
+- What a light client can and cannot do
+- How to run the CKB light client binary
+- How to build applications using the light client API
+- Real-world use cases: mobile wallets, browser extensions, IoT
+
+## The Problem: Full Nodes Are Too Heavy
+
+A CKB full node downloads and validates every block from the genesis block to the present. As of 2025, CKB mainnet has over 14 million blocks. Storing all of them requires:
+
+- **Pruned full node**: ~100 GB and growing
+- **Archive full node**: ~300 GB (keeps all historical state)
+- **Sync time**: Hours to days on a fast connection
+
+This is completely fine for servers and desktops. But most users interact with CKB through:
+
+- Mobile phones (64-128 GB total storage, shared with apps, photos, OS)
+- Browser extensions (browsers limit extension storage to megabytes)
+- IoT devices (kilobytes to megabytes of total RAM and flash)
+- dApp frontends (users do not want to download 100 GB to use a website)
+
+Running a full node is impractical for all of these environments. But users in these environments still deserve **trustless** access to the blockchain — not just trust-me-bro access through a centralized API.
+
+This is the problem that light clients solve.
+
+## What Is a Light Client?
+
+A light client participates in the blockchain network WITHOUT downloading every block. Instead, it:
+
+1. Downloads only block **headers** (small structures containing metadata, ~200 bytes each)
+2. Asks full node peers for specific pieces of data (like "what cells does this address own?")
+3. Receives that data along with **Merkle proofs** — cryptographic evidence that the data is part of the real chain
+4. Verifies the proofs locally against the verified headers
+
+The key guarantee: if the headers are real (verified by proof-of-work) and the Merkle proof is valid (verified by hashing), then the data is provably part of the real blockchain. No central party to trust.
+
+### Traditional SPV (Simplified Payment Verification)
+
+Bitcoin's original light client approach (described in the Bitcoin whitepaper) downloads ALL block headers from genesis. For Bitcoin, this is around 60 MB — manageable. For CKB with its faster block time, all headers would be 2.8 GB.
+
+CKB takes this further with a more sophisticated approach.
+
+## CKB's FlyClient Protocol
+
+CKB's light client is based on [FlyClient](https://eprint.iacr.org/2019/226.pdf), a 2019 academic paper by Bunz, Kiffer, Luu, and Zamani. The core insight of FlyClient:
+
+**You don't need to download all headers to verify the chain — you only need to download O(log n) randomly sampled headers.**
+
+This is a fundamental improvement. Where traditional SPV needs 14 million headers, FlyClient needs about 40.
+
+### How Logarithmic Sampling Works
+
+The chain is secured by accumulated proof-of-work: the real chain is the one with the most total work. To verify this, FlyClient uses:
+
+**Merkle Mountain Ranges (MMRs)**: Each block header embeds a commitment (an MMR root) that covers the difficulty of all previous blocks. This is like a compact checksum of "how much work has been done up to this point."
+
+**Sampling strategy**: The light client selects a small set of sample positions — more densely near the tip (recent blocks matter more), more sparsely in the past. The positions follow a logarithmically spaced distribution.
+
+**Verification**: For each sampled header, the light client:
+1. Downloads the header
+2. Verifies its proof-of-work (hash below the difficulty target)
+3. Verifies the MMR root links correctly to adjacent sampled headers
+4. Confirms the difficulty values are consistent with claimed total work
+
+**Security**: An attacker who tries to fake a chain must fake specific headers at the positions the client samples. Since these positions are determined by a random challenge, the attacker cannot know in advance which headers to fake. The probability of fooling the client decreases exponentially as the sampling size increases.
+
+In practice, with ~40 sampled headers, the probability of a successful attack is negligible — equivalent to the security of downloading all 14 million headers.
+
+### The Numbers in Practice
+
+| Chain Height | Traditional SPV | FlyClient |
+|---|---|---|
+| 1,000 blocks | 1,000 headers | ~17 headers |
+| 100,000 blocks | 100,000 headers | ~23 headers |
+| 10,000,000 blocks | 10,000,000 headers | ~33 headers |
+| 14,000,000 blocks | 14,000,000 headers | ~37 headers |
+
+As the chain grows by 10x, FlyClient only needs ~3.3 more headers. This is what "logarithmic complexity" means in practice. The security grows with the chain, but the cost stays nearly flat.
+
+## NC-Max: Why CKB's Consensus Enables Efficient Light Clients
+
+CKB uses **NC-Max consensus** — an improvement on Nakamoto Consensus (Bitcoin's PoW) designed specifically for better throughput and light client support.
+
+### Difficulty Adjustment
+
+Bitcoin adjusts difficulty every 2016 blocks (~2 weeks). CKB adjusts every **epoch** (~4 hours of blocks). This more frequent adjustment:
+
+- Makes the difficulty history smoother (less variance between epochs)
+- Makes MMR commitments more accurate (the difficulty curve is more regular)
+- Reduces the variance in sampling security guarantees
+
+### Uncle Block Handling
+
+CKB formally includes **uncle blocks** in the chain and accounts for their difficulty contribution. This matters for light clients because:
+
+- The total proof-of-work can be accurately computed even without downloading every block
+- Uncles are counted in the MMR difficulty commitments
+- The economic security model is cleaner (no wasted work)
+
+### Built-in MMR Support
+
+CKB's header format was designed from day one to include the MMR root. This is not a bolted-on addition — it is a native field in every block header. The light client code can rely on this field always being present and always being up-to-date.
+
+## Storage Comparison
+
+Here is the concrete storage breakdown for each participation model:
+
+### Archive Full Node
+
+- Stores every block, every transaction, every cell (live and historical)
+- Every piece of historical blockchain state is accessible
+- Storage: 300+ GB and growing with chain activity
+- Sync time: multiple days
+- Use cases: block explorers, analytics platforms, history providers
+
+### Pruned Full Node
+
+- Full validation of every block (executes every script, verifies every proof)
+- Prunes old spent cells and historical state to save space
+- Storage: 100+ GB
+- Sync time: hours to days
+- Use cases: miners, validators, ecosystem infrastructure, DeFi backends
+
+### Light Client
+
+- Downloads only sampled headers during FlyClient sync
+- Stores a local index of cells for **registered scripts only**
+- No historical block data
+- Storage: less than 1 MB (headers + cell index for your scripts)
+- Sync time: 1-5 minutes (depending on how many scripts and how much history)
+- Use cases: mobile wallets, browser extensions, dApp frontends, IoT
+
+### Stateless Client
+
+- Verifies individual Merkle proofs on-demand without storing anything
+- No persistent state
+- Storage: ~0 MB
+- Use cases: one-time verification, embedded systems, read-once checks
+
+The jump from full node to light client is not a minor optimization — it is a reduction of over 100,000x in storage requirements.
+
+## What a Light Client CAN Do
+
+A light client supports a focused set of operations that cover the majority of real user needs:
+
+### Check Your Balance
+
+Register your lock script with `set_scripts`, wait for sync, then call `get_cells`. The light client returns all your live (unspent) cells with their capacities and type script information.
+
+### Send a Transaction
+
+Call `send_transaction`. The light client broadcasts your transaction to its connected full node peers. Those peers validate and propagate it to the rest of the network. The light client does not execute the scripts itself — it relies on the network to do final validation.
+
+### Verify Cell Existence
+
+Ask the light client about a specific cell. It returns the cell data plus a Merkle proof. You can verify locally that the cell is included in a block whose header the light client has verified. This is trustless.
+
+### Monitor for Changes
+
+The light client tracks registered scripts. When cells appear or disappear (are spent), the light client updates its index. Your application can poll for changes or subscribe to events.
+
+### Query Recent Transactions
+
+For transactions in recently-synced blocks, the light client can often return transaction data. This is not guaranteed for historical transactions.
+
+## What a Light Client CANNOT Do
+
+These limitations flow directly from not storing block history:
+
+### Serve Historical Transaction Data
+
+If you want a complete list of all transactions ever involving an address, you need a full node (or an indexer service). The light client only knows about cells currently in its index.
+
+### Provide Data for Unregistered Scripts
+
+If you did not call `set_scripts` for a lock script, the light client has no index for it. Queries return empty results, not because there are no cells, but because the light client did not look for them.
+
+### Act as a Peer for Other Light Clients
+
+Light clients download data from full node peers. They cannot serve as peers for other light clients (since they don't have the full data those clients would ask for).
+
+### Execute Scripts or Do Full Validation
+
+Light clients do not run CKB-VM to execute lock scripts and type scripts. They trust that the network validated transactions correctly. If you need to locally execute scripts, you need a full node.
+
+## Running the CKB Light Client Binary
+
+### Installation
+
+The CKB light client is a separate binary from the CKB full node:
+
+```bash
+# Check the releases page for the latest version
+# https://github.com/nervosnetwork/ckb-light-client/releases
+
+# Example: macOS Apple Silicon
+curl -LO https://github.com/nervosnetwork/ckb-light-client/releases/latest/download/ckb-light-client-macos-arm64.tar.gz
+tar xf ckb-light-client-macos-arm64.tar.gz
+chmod +x ckb-light-client
+```
+
+### Configuration for Testnet
+
+```bash
+mkdir ~/ckb-light-client && cd ~/ckb-light-client
+./ckb-light-client init --chain testnet
+```
+
+The generated `ckb-light-client.toml` includes:
+
+```toml
+[rpc]
+listen_address = "127.0.0.1:9000"
+
+[network]
+# Testnet bootnodes included automatically
+```
+
+### Starting the Binary
+
+```bash
+./ckb-light-client run
+```
+
+After startup, you will see the FlyClient sync completing in 1-5 minutes. Once complete, the RPC is ready to accept queries.
+
+## API Differences: Full Node vs Light Client
+
+The light client speaks the same JSON-RPC protocol as the full node. Many method names are identical. But there are important differences:
+
+### Methods Available on Both
+
+```
+get_tip_header          → Get the current chain tip header
+get_header              → Get a header by block hash
+get_cells               → Search live cells (light client: registered scripts only)
+send_transaction        → Broadcast a transaction
+get_transaction         → Get transaction by hash (limited history on light client)
+```
+
+### Light-Client-Only Methods
+
+```
+set_scripts    → Register lock/type scripts to watch
+get_scripts    → List registered scripts and sync status
+```
+
+### Full-Node-Only Methods (NOT on light client)
+
+```
+get_block               → Get full block data
+get_blockchain_info     → Chain metadata
+get_block_economic_state → Block reward information
+get_indexer_cells       → Arbitrary cell queries (no pre-registration needed)
+```
+
+### Using set_scripts
+
+Before querying cells, register the scripts you care about:
+
+```typescript
+// JSON-RPC call to the light client
+const response = await fetch("http://localhost:9000", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "set_scripts",
+    params: [[
+      {
+        script: {
+          code_hash: "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+          hash_type: "type",
+          args: "0xYOUR_ADDRESS_ARGS",
+        },
+        script_type: "lock",
+        // block_number: where to start looking
+        // "0x0" = from genesis (slow, but finds all history)
+        // current block = fast but misses old transactions
+        block_number: "0x0",
+      }
+    ]],
+  }),
+});
+```
+
+**Important**: `set_scripts` replaces the entire registered list on each call. To add scripts without losing existing ones, first call `get_scripts`, merge the lists, then call `set_scripts`.
+
+### Using @ckb-ccc/core with a Light Client
+
+The `@ckb-ccc/core` library works with both full nodes and light clients. Just point it at the right URL:
+
+```typescript
+import { ccc } from "@ckb-ccc/core";
+
+// With light client (after set_scripts has been called)
+const lightClientRpc = "http://localhost:9000";
+
+// The cell query API is identical
+for await (const cell of client.findCells({
+  script: myLockScript,
+  scriptType: "lock",
+})) {
+  const ckb = cell.cellOutput.capacity / 100_000_000n;
+  console.log(`Cell: ${ckb} CKB at ${cell.outPoint.txHash}`);
+}
+```
+
+## Step-by-Step Tutorial
+
+### Step 1: Install the Light Client Binary
+
+Follow the installation steps above for your operating system. Initialize for testnet.
+
+### Step 2: Start the Light Client
+
+```bash
+./ckb-light-client run
+```
+
+Wait for the FlyClient sync to complete (watch for "Header sync complete" in the logs).
+
+### Step 3: Register Your Script
+
+```bash
+# Using curl to test the RPC
+curl -X POST http://localhost:9000 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "set_scripts",
+    "params": [[{
+      "script": {
+        "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+        "hash_type": "type",
+        "args": "0xYOUR_ARGS"
+      },
+      "script_type": "lock",
+      "block_number": "0x0"
+    }]]
+  }'
+```
+
+### Step 4: Check Sync Progress
+
+```bash
+curl -X POST http://localhost:9000 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"get_scripts","params":[]}'
+```
+
+The `block_number` in the response shows how far the light client has synced for each script.
+
+### Step 5: Query Your Cells
+
+```bash
+curl -X POST http://localhost:9000 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "get_cells",
+    "params": [{
+      "script": {
+        "code_hash": "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+        "hash_type": "type",
+        "args": "0xYOUR_ARGS"
+      },
+      "script_type": "lock"
+    }, "asc", "0x64", null]
+  }'
+```
+
+### Step 6: Run the Lesson Code
+
+```bash
+cd lessons/20-light-client-app
+npm install
+npm start
+```
+
+The code demonstrates all concepts covered in this lesson, including a demo mode that works even without the light client binary running.
+
+## Real-World Use Cases
+
+### Mobile Wallets
+
+Mobile CKB wallets can use the light client to provide fully self-custodial balance checking and transaction sending without the user needing to download 100 GB. The wallet app runs a light client in the background, registers the user's lock script on first launch, and the sync completes in minutes.
+
+### Browser Extensions
+
+A CKB browser wallet extension (similar to MetaMask for Ethereum) can embed a light client. When the user opens the extension, it syncs in the background using FlyClient. The user gets trustless balance information without any centralized API.
+
+### dApp Frontends
+
+Web dApps can use the `@ckb-ccc/core` library pointed at a locally-running light client. This gives users trustless interaction with the dApp without having to run a full node.
+
+### IoT and Embedded Devices
+
+Devices with very limited resources (microcontrollers, Raspberry Pi, etc.) can run the light client to receive payments, verify cell states, and interact with the CKB network. The ~1 MB storage footprint fits even in constrained environments.
+
+### Low-Bandwidth Environments
+
+Users in regions with slow internet (satellite, mobile data) can sync a light client in minutes rather than the hours-days required for a full node.
+
+## The @ckb-lumos/light-client Package
+
+The Nervos ecosystem maintained an `@ckb-lumos/light-client` npm package that wrapped the light client RPC in a JavaScript-friendly interface. Check the [lumos repository](https://github.com/ckb-js/lumos) for the current status of this package.
+
+As of 2025, `@ckb-ccc/core` is the recommended library for new applications. It works with both full node and light client endpoints using the same API surface.
+
+## Summary
+
+| Topic | Key Point |
+|---|---|
+| Light client definition | Participates in network without downloading all blocks |
+| FlyClient protocol | Downloads O(log n) headers instead of O(n) — exponentially fewer |
+| How sampling works | Logarithmically spaced random samples verified via MMR commitments |
+| NC-Max advantage | Frequent difficulty adjustment + MMR in headers = efficient FlyClient |
+| Storage savings | < 1 MB vs 100+ GB (reduction of >100,000x) |
+| Can do | Verify cell existence, query live cells (registered), send transactions |
+| Cannot do | Historical data, arbitrary script queries, serve other light clients |
+| Key API method | set_scripts (register before querying), get_scripts (check sync) |
+| Use cases | Mobile wallets, browser extensions, IoT, dApp frontends |
+| Security model | Probabilistic but very high confidence; stronger with larger sample size |
+
+CKB's light client represents a carefully designed solution to one of blockchain's core accessibility problems. By using FlyClient's logarithmic sampling with NC-Max's epoch-based difficulty adjustment and native MMR header support, CKB enables trustless participation in the network with just kilobytes of storage and a few minutes of sync time.
+
+In the next lesson, you will explore RGB++ — a protocol that uses CKB's programmability to bring smart contracts and DeFi to Bitcoin.

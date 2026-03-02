@@ -1,0 +1,22 @@
+{
+  "name": "23-nft-marketplace",
+  "version": "1.0.0",
+  "description": "Lesson 23: Full-Stack NFT Marketplace combining Spore NFTs, CCC wallet integration, and atomic swaps",
+  "main": "dist/index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@ckb-ccc/core": "^0.1.0",
+    "@ckb-ccc/connector-react": "^0.1.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

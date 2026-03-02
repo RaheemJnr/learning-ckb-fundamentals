@@ -1,0 +1,101 @@
+{
+  "lessonId": 19,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What is the fundamental difference between a CKB full node and a light client?",
+      "options": [
+        "A full node runs on servers while a light client runs on mobile devices; both verify the same data",
+        "A full node downloads all block data and independently executes every script to verify all state transitions; a light client only downloads block headers and uses cryptographic Merkle proofs to verify specific cells without running scripts",
+        "A full node requires more RAM but performs identical verification to a light client; the only difference is resource usage",
+        "A full node requires a private key to participate in the network while a light client is read-only and can only query data"
+      ],
+      "correctAnswer": 1,
+      "explanation": "A full node is a complete, independent verifier. It downloads every block body, executes every script (lock scripts, type scripts), validates proof-of-work, and maintains the complete UTXO set. It trusts no one — it verifies everything cryptographically. A light client takes a fundamentally different approach: it only downloads and verifies block headers (which contain PoW), then uses Merkle proofs to verify the inclusion of specific cells or transactions without downloading the full block data. Light clients trust the longest chain of headers but do not independently execute scripts — this makes them fast and lightweight but slightly less trustless than a full node."
+    },
+    {
+      "id": 2,
+      "question": "Which hardware bottleneck most significantly affects CKB initial sync speed, and why?",
+      "options": [
+        "CPU speed, because CKB-VM executes RISC-V scripts during validation and the CPU must process millions of script executions",
+        "Network bandwidth, because all block data must be downloaded from peers and network speed determines the maximum sync rate",
+        "Storage I/O speed (specifically NVMe vs HDD), because the node must read and write hundreds of gigabytes of block data, UTXO set, and index data during sync — storage I/O is typically the primary bottleneck on modern hardware",
+        "RAM size, because the entire UTXO set must fit in memory for validation to proceed"
+      ],
+      "correctAnswer": 2,
+      "explanation": "During initial sync, the CKB node must write every block to disk, update the UTXO set database, build the indexer, and read previously written data for validation. This creates an enormous amount of random and sequential I/O. On spinning hard disk drives (HDDs), this I/O bottleneck typically causes sync to take 5-10x longer than on NVMe SSDs. A modern CKB node has enough CPU for script execution and enough RAM for caches, but the I/O subsystem is the weak link for initial sync. Using an NVMe SSD is the single most impactful hardware choice for reducing sync time."
+    },
+    {
+      "id": 3,
+      "question": "In ckb.toml, what does the `[rpc] listen_address` setting control, and what is the security implication of using \"0.0.0.0:8114\" vs \"127.0.0.1:8114\"?",
+      "options": [
+        "It controls which CKB P2P port peers connect to; 0.0.0.0 allows internet peers while 127.0.0.1 is local-only — there is no security difference since P2P connections are safe",
+        "It controls the HTTP JSON-RPC server address; 127.0.0.1 restricts access to local processes only (more secure), while 0.0.0.0 makes the RPC accessible from any network interface including your LAN and potentially the internet — exposing it to the internet allows anyone to query your node and call admin methods",
+        "It controls the WebSocket subscription server; 0.0.0.0 enables subscriptions while 127.0.0.1 disables them — using 0.0.0.0 is always recommended for development",
+        "It controls the miner connection address used when submitting mined blocks; this setting only matters if you are running a mining operation"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The listen_address in [rpc] controls which network interfaces the JSON-RPC HTTP server binds to. With 127.0.0.1:8114, only processes running on the same machine can call the RPC — this is the secure default because it prevents external access. With 0.0.0.0:8114, the server accepts connections on all interfaces: localhost, LAN, and potentially the public internet if your firewall allows port 8114 through. This exposes admin methods like clear_tx_pool and set_ban to anyone who can reach port 8114. For remote access scenarios, use 0.0.0.0 with a firewall rule restricting access to specific trusted IP addresses."
+    },
+    {
+      "id": 4,
+      "question": "What are the two phases of CKB initial block synchronization, and what happens in each phase?",
+      "options": [
+        "Phase 1 downloads mainnet blocks and Phase 2 downloads testnet blocks; both phases run in parallel and the node merges the chains at the end",
+        "Phase 1 (header sync) downloads and validates block headers by verifying proof-of-work, establishing the canonical chain; Phase 2 (block sync) downloads full block bodies and executes all scripts to validate state transitions — both phases run concurrently once enough headers are available",
+        "Phase 1 syncs the transaction pool (mempool) to ensure the node has recent unconfirmed transactions; Phase 2 syncs historical blocks to build the full UTXO set",
+        "Phase 1 downloads blocks from bootstrap nodes only; Phase 2 enables full peer discovery and downloads the remaining blocks from discovered peers"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB sync has two parallel phases. In the header sync phase (fast), the node downloads just block headers (~200 bytes each) from peers and verifies the proof-of-work on each header. This determines the canonical chain (the one with the most cumulative PoW). Headers can be downloaded very quickly — thousands per second. In the block sync phase (slower), the node downloads full block bodies for headers already verified in phase 1. This involves downloading all transactions, executing every script (lock and type scripts), and updating the UTXO set. Block bodies can be several MB each, and script execution takes CPU time. Both phases run concurrently: while earlier blocks are being fully validated, the header phase downloads headers for newer blocks."
+    },
+    {
+      "id": 5,
+      "question": "What is the CKB indexer, why is it required for wallet balance queries, and what happens when you enable it on an existing synced node?",
+      "options": [
+        "The indexer is CKB's built-in search engine that indexes transaction content for full-text search; it is not required for balance queries which use only UTXO lookups",
+        "The indexer is an optional security module that scans transactions for known malicious patterns; enabling it improves node security but has no effect on RPC query capabilities",
+        "The indexer maintains a secondary index of cells organized by lock script and type script; without it, there is no efficient way to find all cells owned by a given lock script. When enabled on an existing synced node, it must process all historical blocks from genesis to build the index, which takes hours proportional to chain length",
+        "The indexer is automatically synchronized from the bootstrap nodes and does not need local processing; enabling it just downloads a pre-built index snapshot from the network"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The CKB UTXO set (live cell set) stores cells organized by OutPoint (tx_hash + index), not by lock script. This means there is no direct way to ask 'give me all cells with lock script X' without scanning the entire UTXO set. The indexer solves this by maintaining a parallel index keyed by lock script and type script. With the indexer, queries like get_cells, get_cells_capacity, and get_transactions are efficient O(log n) lookups. Without it, these methods are unavailable. When you enable the indexer on an existing synced node, it processes blocks sequentially from genesis to the current tip, building the index as it goes. On testnet this may take 1-3 hours; on mainnet, longer. Queries return incomplete/incorrect results until the indexer catches up."
+    },
+    {
+      "id": 6,
+      "question": "What is OffCKB and when should you use it instead of a real CKB testnet node?",
+      "options": [
+        "OffCKB is an offline CKB simulator that works without internet but cannot run real scripts — use it only when you have no internet connection",
+        "OffCKB is a developer tool that provides an instant-on local devnet with pre-deployed system scripts, pre-funded test accounts, and configurable block production — use it for rapid iteration on smart contract logic, writing tests, and development workflows that need deterministic behavior without waiting hours for testnet sync",
+        "OffCKB is CKB's official staging environment that mirrors mainnet state — use it when you want to test on near-mainnet conditions before deploying",
+        "OffCKB is a hardware wallet integration tool for CKB development; it simulates hardware signing without needing a physical device"
+      ],
+      "correctAnswer": 1,
+      "explanation": "OffCKB (npm: @offckb/cli) is a developer experience tool that wraps a CKB devnet configuration for instant startup. Run `npx @offckb/cli@latest start` and within seconds you have a fully functional local CKB node at localhost:8114 with: instant block production (no real PoW, blocks produced on demand or every second), pre-deployed versions of all system scripts (secp256k1, omnilock, xUDT, Spore), and pre-funded test accounts. Use OffCKB when you are writing and testing smart contracts (fast feedback loop), running automated tests (deterministic block times), or exploring CKB without the 1-4 hour testnet sync delay. Use a real testnet node when you need to test against actual network conditions, propagation timing, or interact with real on-chain state from other users."
+    },
+    {
+      "id": 7,
+      "question": "Which CKB RPC methods are available ONLY on a local node and not on public endpoints, and why are they restricted?",
+      "options": [
+        "get_block and get_transaction are restricted on public endpoints because they expose too much transaction detail",
+        "local_node_info, get_peers, and administrative methods like clear_tx_pool, set_ban, and add_node are restricted on public endpoints because they expose sensitive node information (P2P node ID, peer addresses, internal state) and allow callers to manipulate the node's P2P connections and transaction pool",
+        "send_transaction is restricted on public endpoints because broadcasting transactions requires operator authorization to prevent spam",
+        "get_cells and get_cells_capacity are restricted on public endpoints because the indexer is too computationally expensive to serve publicly"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Public RPC endpoints deliberately disable several categories of methods. Net methods like local_node_info and get_peers expose the node's P2P identity (node_id), its listen addresses, and the IP addresses of all connected peers — this information could enable targeted attacks on the node or its peer network. Administrative methods like clear_tx_pool (empties the mempool), set_ban (bans/unbans peer addresses), add_node/remove_node (manipulates connections), and set_network_active (disables networking entirely) would allow arbitrary callers to disrupt the node's operation. Running your own node gives you access to all these methods, which are essential for node monitoring, debugging, and advanced P2P network analysis."
+    },
+    {
+      "id": 8,
+      "question": "What is the difference between pruned mode and archive mode in a CKB node, and which use cases require archive mode?",
+      "options": [
+        "Pruned mode removes all transactions from blocks to save space while keeping block headers; archive mode keeps the full transaction data. Both modes support the same RPC queries.",
+        "Pruned mode and archive mode are identical in storage usage; pruned mode just compresses the data with a different algorithm for faster reads",
+        "Archive mode retains all historical block bodies indefinitely. Pruned mode discards old block bodies after their effects are absorbed into the UTXO set, reducing storage. Use cases requiring archive mode include block explorers (users query any historical transaction), forensic analysis of old transactions, and serving historical block data to newly-syncing peers",
+        "Archive mode is a testnet-only setting that mirrors all mainnet blocks; pruned mode is for mainnet where only recent blocks are needed"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Archive mode (the default) retains every block body forever. This consumes the most storage but enables any historical query — you can fetch block data from years ago. Pruned mode reduces storage by discarding old block bodies after the UTXO set (live cell set) has been updated. The UTXO set itself is always kept in full — pruned nodes still validate the complete current chain state. The trade-off: pruned nodes cannot serve old blocks to other syncing peers, and historical transaction lookups for very old transactions may fail. Use cases requiring archive mode: block explorers that let users look up any transaction ever made; compliance and forensic tools that audit specific historical transactions; nodes that serve historical block data to other nodes during their initial sync."
+    }
+  ]
+}

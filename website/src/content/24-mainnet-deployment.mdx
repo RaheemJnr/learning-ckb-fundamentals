@@ -1,0 +1,391 @@
+# Mainnet Deployment and Security
+
+## Overview
+
+This is the final lesson of the course. You have built dApps, written scripts, deployed tokens, and created NFT marketplaces on testnet. Now it is time to go to production.
+
+Deploying to CKB mainnet is irreversible. The code hash you publish will be immutable (if using `hash_type: "data1"`), the cells you create will hold real value, and mistakes cannot be rolled back. This lesson gives you the knowledge and checklists to do it right.
+
+## Devnet to Testnet to Mainnet
+
+Every serious CKB deployment follows a three-environment progression. Rushing or skipping stages is the most common cause of production incidents.
+
+### Stage 1: Devnet (Local Development)
+
+The devnet is a local CKB node running on your machine. Tools like `offckb` make this a one-command setup:
+
+```bash
+offckb init myproject
+offckb node start
+```
+
+The devnet has instant block times and pre-funded genesis accounts with unlimited test CKB. You can reset the chain state at any time. This is where you iterate quickly: write code, test it, break it, fix it.
+
+**Goals**: Unit tests passing, basic transaction flows working, binary hash computed.
+
+### Stage 2: Testnet (Pre-Production Validation)
+
+The testnet is a public network that mirrors mainnet's consensus rules. Get testnet CKB from the faucet at https://faucet.nervos.org and deploy your script there.
+
+The testnet has real network latency, real block times (~10 seconds), and real mempool dynamics. Issues that are invisible on devnet — fee estimation, transaction propagation delays, simultaneous transaction conflicts — appear here.
+
+**Goals**: Every transaction type your protocol supports has been tested with real testnet transactions. Edge cases verified. Frontend tested across multiple browsers and wallets.
+
+### Stage 3: Mainnet (Production)
+
+Only deploy to mainnet after completing a full testnet validation cycle. Mainnet transactions are final, mainnet CKB has real value, and users will depend on your protocol for real assets.
+
+**Goals**: Deploy with a hardware wallet, verify the deployment on CKB Explorer, run smoke tests with small amounts before announcing.
+
+## Pre-Deployment Checklist
+
+Before each stage transition, work through a checklist. For the testnet-to-mainnet transition, the critical items are:
+
+**Code and testing:**
+- All script code reviewed by at least two developers
+- Unit tests achieve 100% branch coverage on security-critical paths
+- Integration tests run against the compiled binary on devnet
+- All transaction types tested on testnet with real transactions
+- Edge cases verified: zero amounts, maximum amounts, empty data, malformed args
+
+**Security:**
+- No hardcoded private keys in the codebase or git history
+- All integer arithmetic uses overflow-safe operations (`checked_add`, `checked_mul`)
+- All script args validated for correct length before parsing
+- Lock script handles unauthorized access correctly (returns error, not silent success)
+- Type script handles all three operation types: create, update, and destroy
+
+**Keys:**
+- Mainnet deployment key stored on a hardware wallet (Ledger, Trezor)
+- Admin/upgrade capability uses multisig, not a single key
+- Testnet keys are completely separate from mainnet keys
+
+**Documentation:**
+- Deployment record prepared (transaction hash, cell index, code hash)
+- User-facing documentation ready
+- Emergency response plan documented
+
+## Script Verification: Code Hashes
+
+The most critical piece of deployment data is the **code hash** — the blake2b hash of your compiled script binary.
+
+### Computing the Code Hash
+
+```typescript
+import { ckbHash } from "@ckb-ccc/core";
+import { readFileSync } from "fs";
+
+const binary = readFileSync("./build/release/my-script");
+const codeHash = ckbHash(binary);
+console.log("code_hash:", codeHash);
+```
+
+Or using the command-line tool:
+
+```bash
+ckb-cli util blake2b --binary-path ./build/release/my-script
+```
+
+### Recording Deployment Information
+
+Create a `deployments.json` in your project to permanently record all deployment information:
+
+```json
+{
+  "scripts": {
+    "tokenDexLock": {
+      "mainnet": {
+        "deploymentTxHash": "0x...",
+        "cellIndex": 0,
+        "codeHash": "0x...",
+        "hashType": "data1",
+        "deployedAt": "2024-02-01T12:00:00Z"
+      },
+      "testnet": {
+        "deploymentTxHash": "0x...",
+        "cellIndex": 0,
+        "codeHash": "0x...",
+        "hashType": "data1",
+        "deployedAt": "2024-01-20T14:00:00Z"
+      }
+    }
+  }
+}
+```
+
+**Critical**: The `codeHash` for the same binary must be identical across all environments. If testnet and mainnet have different code hashes, you deployed different binaries — stop and investigate.
+
+### Verifying on CKB Explorer
+
+After broadcasting the deployment transaction:
+1. Wait for 6+ block confirmations
+2. Search for your transaction hash on https://explorer.nervos.org
+3. Find your code cell in the outputs
+4. Verify the cell's data hash matches your expected `codeHash`
+5. Record the confirmation block number
+
+## Upgradeability: hash_type "data" vs "type"
+
+One of the most consequential decisions in CKB deployment is whether your scripts should be upgradeable.
+
+### hash_type "data1" — Immutable
+
+When cells reference a script with `hash_type: "data1"`, the reference is to the exact binary hash. There is no mechanism to change the code. The behavior is locked forever.
+
+**Advantages**: Users can trust exactly what code runs. No admin key can upgrade the script to steal funds. The protocol is credibly neutral and immutable.
+
+**Disadvantages**: Bugs cannot be patched. Features cannot be added. If a vulnerability is found, users must migrate to a new deployment.
+
+**Use when**: The script is simple, thoroughly audited, and correct behavior is critical. The default CKB lock script (SECP256K1) uses `data1` — billions of dollars depend on its immutability.
+
+### hash_type "type" — Upgradeable via Type ID
+
+When cells reference a script with `hash_type: "type"`, the reference is to a **Type ID** — a special value assigned to the code cell when it is first deployed. The code cell can be replaced in a future transaction as long as you control the key locking it, and all cells referencing the Type ID will automatically use the new code.
+
+**Advantages**: Bugs can be fixed. Features can be added. Appropriate for protocols still being developed.
+
+**Disadvantages**: Requires an admin key, which is a centralization risk. If the admin key is compromised, an attacker can replace your script with malicious code. Users must trust the admin.
+
+**Use when**: The protocol is in early stages, bugs are anticipated, or iteration is planned. Must implement a governance mechanism (multisig, timelock) to prevent unauthorized upgrades.
+
+### The Practical Recommendation
+
+For a first production deployment, use `hash_type: "type"` with a multisig governance mechanism and a timelock of at least 7 days. This allows emergency bug fixes while giving users enough time to exit if an upgrade is proposed they disagree with.
+
+For a mature protocol that has been stable for 6-12 months, consider migrating authority to `data1` — transfer governance to the immutable version, which eliminates the admin key risk entirely.
+
+## Common Vulnerability Patterns
+
+### Incomplete Authorization
+
+A lock script that checks some conditions but misses others can be exploited by constructing transactions that satisfy the checked conditions while violating unchecked ones.
+
+Example: A multisig lock that verifies "at least 2 signatures are valid" but doesn't verify the signers are from the authorized set. An attacker can provide 2 valid signatures from their own keys.
+
+Defense: For every condition you intend to enforce, write a test that violates only that condition and verify the script rejects it.
+
+### Missing Operation Cases
+
+Type scripts run for cells in both inputs and outputs, covering create, update, and destroy operations. A common vulnerability is implementing the update case correctly but leaving destroy unrestricted.
+
+Example: A token type script that enforces conservation during transfers but allows destruction (no output cells) without any authorization. An attacker burns tokens by simply including token input cells with no token output cells.
+
+Defense: Explicitly handle all three cases. Use the (input_count, output_count) tuple to determine which operation is occurring and validate each one.
+
+### Integer Overflow
+
+CKB scripts work with raw 64-bit and 128-bit unsigned integers. Overflow in token amount calculations can allow minting tokens beyond the intended supply cap, or wrap-around attacks that bypass thresholds.
+
+In Rust, use checked arithmetic:
+
+```rust
+// Unsafe - can overflow silently
+let total = amount_a + amount_b;
+
+// Safe - returns None on overflow
+let total = amount_a.checked_add(amount_b)
+    .ok_or(Error::Overflow)?;
+```
+
+### Fixed Index Assumptions
+
+If a script assumes "the payment output is always at index 0", an attacker can construct a transaction where it is at a different index. CKB transactions allow any input/output ordering.
+
+Defense: Iterate all outputs to find the one that matches your criteria rather than assuming a fixed position.
+
+```rust
+// Unsafe - assumes payment is at index 0
+let payment = load_cell_output(0, Source::Output)?;
+
+// Safe - find the matching output regardless of position
+for (i, output) in QueryIter::new(load_cell_output, Source::Output).enumerate() {
+    if matches_payment_criteria(&output) {
+        // process payment
+    }
+}
+```
+
+### Args Length Unchecked
+
+If a script assumes its args are a specific length and does not verify this, an attacker can create cells with malformed args. Always validate:
+
+```rust
+let args = load_script()?.args();
+if args.len() != EXPECTED_ARGS_LENGTH {
+    return Err(Error::InvalidArgsLength);
+}
+```
+
+## Key Management for Production
+
+### Hardware Wallets
+
+The mainnet deployment key and any admin/upgrade authority keys must be stored on hardware wallets (Ledger, Trezor, or equivalent). Software wallets are acceptable for testnet but not for production keys controlling real value.
+
+### Multisig for Admin Operations
+
+Single-key admin authority is a single point of failure. Use multisig (M-of-N) for any admin operations that control significant value or protocol parameters. On CKB, this is implemented with Omnilock's multisig mode or a custom multisig lock script.
+
+A 2-of-3 multisig stored across three hardware wallets held by different team members eliminates the single-key risk while remaining operationally practical.
+
+### Separate Keys Per Network
+
+Never reuse a private key between testnet and mainnet. Testnet operations are inherently less secure — keys are often stored in CI systems, shared among team members, or left in configuration files. If a testnet key is leaked, it must not give access to any mainnet assets.
+
+## Monitoring Deployed Contracts
+
+### Script Cell Existence
+
+Your deployed code cell should never be consumed. Monitor it:
+
+```typescript
+const ws = new WebSocket("wss://mainnet.ckb.dev/ws");
+ws.send(JSON.stringify({
+  id: 1,
+  jsonrpc: "2.0",
+  method: "subscribe",
+  params: ["new_transaction"],
+}));
+
+ws.onmessage = (event) => {
+  const { transaction } = JSON.parse(event.data);
+  for (const input of transaction.inputs) {
+    if (input.previousOutput.txHash === SCRIPT_DEPLOYMENT_TX_HASH) {
+      alert("CRITICAL: Script deployment cell consumed! Protocol may be broken.");
+    }
+  }
+};
+```
+
+### Total Value Locked
+
+Track the CKB capacity locked in your protocol's cells as a health metric:
+
+```typescript
+async function getTVL(client: ccc.Client): Promise<bigint> {
+  let tvl = 0n;
+  for await (const cell of client.findCells({
+    script: YOUR_SCRIPT,
+    scriptType: "lock",
+  })) {
+    tvl += cell.cellOutput.capacity;
+  }
+  return tvl;
+}
+```
+
+### Anomaly Detection
+
+Set up alerts for:
+- TVL dropping more than 20% in a single block (possible attack or mass exit)
+- Script cell's outpoint appearing as an input in any transaction
+- Unusual transaction size spikes
+- Frontend error rate increases
+
+## Emergency Response Plan
+
+Prepare your response plan before you need it. The worst time to figure out your emergency procedure is during an active incident.
+
+### Response Levels
+
+**Level 1 — Unusual activity**: Investigate thoroughly before acting. Many anomalies are benign. Prepare a Level 2 response but do not execute it prematurely.
+
+**Level 2 — Confirmed bug**: Prepare an emergency upgrade (if using `hash_type: "type"`) or a migration path for users to a fixed deployment (if using `data1`). Announce the issue to the community with a clear timeline.
+
+**Level 3 — Active attack or fund drainage**: Move admin authority to a new secure key immediately. Announce to the community through all official channels. Contact CKB Foundation security at security@nervos.org. Prepare and execute the fastest possible mitigation.
+
+### Communication Templates
+
+Prepare announcement templates for different scenarios before mainnet launch. Being able to communicate clearly and quickly during an incident is as important as the technical response.
+
+## Production Best Practices
+
+**Document everything**: Record all deployment transaction hashes, code hashes, and deployment metadata. Write a runbook with step-by-step procedures for common operational tasks.
+
+**Gradual rollout**: For new protocols, consider a "soft launch" with limited funds before full public announcement. This lets you catch real-world issues with manageable exposure.
+
+**Audit before mainnet**: For any protocol managing significant value, engage a CKB-specialized security firm for a formal audit before mainnet. The cost is small compared to potential losses.
+
+**Incident post-mortems**: After any incident, publish a full post-mortem describing what happened, why, the timeline, and what was learned. Transparency builds long-term trust.
+
+## Real-World Deployment Stories
+
+The CKB ecosystem has accumulated hard-won deployment wisdom:
+
+- The default SECP256K1 lock was deployed once during genesis and has remained unchanged, protecting billions of dollars. Its immutability is its greatest security property.
+- The Nervos DAO type script was carefully designed to be upgradeable via Type ID while requiring a governance vote for any changes.
+- Several DeFi protocols launched with `hash_type: "type"` admin keys initially, then transferred governance to multisig structures as they matured.
+- Security researchers have found vulnerabilities in early script implementations that were avoided in production through careful testing and community review.
+
+The consistent pattern: protocols that invest in thorough testing, clear documentation, and conservative key management avoid incidents. Protocols that rush to mainnet without completing this work are the ones that make it into post-mortems.
+
+## Step-by-Step Tutorial
+
+### Step 1: Install and Run the Tools
+
+```bash
+cd lessons/24-mainnet-deployment
+npm install
+npm start
+```
+
+### Step 2: Run the Security Checklist
+
+```bash
+npm run checklist
+```
+
+Read each item in the checklist output carefully. Understand why each check exists and what vulnerability it prevents.
+
+### Step 3: Review the Deployment Checklist
+
+Open `scripts/deploy-checklist.md` and read through all ten phases. This is the document you would work through for any real production deployment.
+
+### Step 4: Understand Upgradeability Trade-offs
+
+In `src/index.ts`, find `explainUpgradeability`. Read the pros and cons of each `hash_type` choice. Think about which you would use for the DEX from Lesson 22 and why.
+
+### Step 5: Review Common Vulnerability Patterns
+
+Find the section on script vulnerabilities in both `src/index.ts` and `src/security-checklist.ts`. For each vulnerability pattern, think about whether the scripts you have written in previous lessons would be affected.
+
+## Congratulations: What You Have Learned
+
+Across 24 lessons, you have built a complete foundation in CKB development:
+
+**Foundations**: The cell model, transaction anatomy, capacity economics, the CKB-VM, and your first on-chain transfer.
+
+**Script development**: Lock scripts, type scripts, state machines, xUDT tokens, debugging, and the RISC-V architecture.
+
+**Advanced protocols**: Composability, Omnilock, cell lifecycle management, the RPC interface, full nodes, and light clients.
+
+**Applications**: RGB++ cross-chain assets, a token DEX with atomic swaps, an NFT marketplace with Spore and CCC, and now production deployment.
+
+## What Comes Next
+
+The CKB ecosystem is expanding rapidly. Having completed this course, you are equipped to contribute to and build on:
+
+**Fiber Network**: CKB's Lightning Network implementation for fast, cheap off-chain payments using the same channel construction as Bitcoin Lightning, adapted for CKB's cell model.
+
+**RGB++**: The protocol binding Bitcoin UTXOs to CKB cells, enabling Bitcoin DeFi without traditional bridges. RGB++ is one of the most technically innovative cross-chain designs in the industry.
+
+**UTXOSwap**: The production DEX using exactly the order cell pattern from Lesson 22. Contribute to the matching engine, the frontend, or the protocol improvements.
+
+**Spore Protocol**: Deep-dive into advanced Spore features — clusters, mutations, on-chain generative art, and the growing ecosystem of Spore-based applications.
+
+**Community**: Join https://talk.nervos.org, https://discord.gg/nervosnetwork, and contribute to open-source CKB repositories on GitHub. The community is welcoming to developers with deep understanding of the protocol.
+
+## Summary
+
+Deploying to CKB mainnet requires the same rigor as any production system managing real value:
+
+- A three-stage progression: devnet → testnet → mainnet, with verification at each step
+- Script code hashes computed, recorded, and verified to be consistent across environments
+- A deliberate choice between immutable (`data1`) and upgradeable (`type`) scripts
+- Hardware wallets and multisig for production keys
+- Monitoring for script cell existence, TVL, and anomalies
+- An emergency response plan prepared before it is needed
+
+The patterns you have learned throughout this course — the cell model, lock and type scripts, atomic swaps, composability — are not just techniques for CKB. They represent a fundamentally different way of thinking about decentralized state that extends across UTXO-based systems and influences how the entire blockchain industry thinks about programmable money.
+
+You are now a CKB developer. Build something meaningful.
