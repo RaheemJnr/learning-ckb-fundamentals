@@ -1,0 +1,101 @@
+{
+  "lessonId": 2,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What are the six top-level arrays in a CKB transaction?",
+      "options": [
+        "inputs, outputs, signatures, gas, nonce, data",
+        "cell_deps, header_deps, inputs, outputs, outputs_data, witnesses",
+        "from, to, value, data, gas_limit, gas_price",
+        "prev_hash, merkle_root, timestamp, nonce, difficulty, transactions"
+      ],
+      "correctAnswer": 1,
+      "explanation": "A CKB transaction contains six arrays: cell_deps (script code references), header_deps (block header references), inputs (cells to consume), outputs (cells to create), outputs_data (data for each output), and witnesses (signatures and proofs)."
+    },
+    {
+      "id": 2,
+      "question": "What happens to input cells when a transaction is committed?",
+      "options": [
+        "They are updated in place with new values",
+        "They are moved to a different address",
+        "They are destroyed (become 'dead cells') and can never be used again",
+        "They are temporarily locked until the next block"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Input cells are consumed (destroyed) when a transaction is committed. They become 'dead cells' and can never be spent again. This is the consume-and-create model -- there is no in-place mutation in CKB."
+    },
+    {
+      "id": 3,
+      "question": "What is a cell dependency (cell_dep) used for?",
+      "options": [
+        "To specify which wallets can sign the transaction",
+        "To reference on-chain cells that contain the executable script code needed for validation",
+        "To link the transaction to a specific block number",
+        "To define the order in which outputs are created"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Cell deps point to on-chain cells whose data field contains the compiled script binaries. Since cells only store a hash of their script code (code_hash), cell deps tell the CKB-VM where to find the actual executable code to run during validation."
+    },
+    {
+      "id": 4,
+      "question": "Why are witnesses NOT included in the transaction hash (tx_hash)?",
+      "options": [
+        "To save space in the blockchain",
+        "Because witnesses are optional and may be empty",
+        "To avoid a circular dependency: you need the tx_hash to create the signature, which goes into the witness",
+        "Because witnesses are stored in a separate database"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The tx_hash is computed from everything except witnesses. This is necessary because you first compute the tx_hash, then sign it to produce the signature, then place the signature into the witnesses array. Including witnesses in the hash would create an impossible circular dependency."
+    },
+    {
+      "id": 5,
+      "question": "How is the transaction fee calculated in CKB?",
+      "options": [
+        "gas_used multiplied by gas_price",
+        "A fixed fee of 0.01 CKB per transaction",
+        "sum(input capacities) minus sum(output capacities)",
+        "The fee is set by the miner after the transaction is submitted"
+      ],
+      "correctAnswer": 2,
+      "explanation": "CKB has no gas concept. The fee is simply the difference between total input capacity and total output capacity: fee = sum(inputs) - sum(outputs). This is the same model Bitcoin uses. The leftover capacity not assigned to any output goes to the miner."
+    },
+    {
+      "id": 6,
+      "question": "What is the difference between 'code' and 'depGroup' dep types in cell_deps?",
+      "options": [
+        "'code' is for lock scripts and 'depGroup' is for type scripts",
+        "'code' means the cell's data is the script binary directly; 'depGroup' means the cell's data is a list of OutPoints to other code cells",
+        "'code' is compiled and 'depGroup' is interpreted",
+        "'code' runs on CKB-VM and 'depGroup' runs off-chain"
+      ],
+      "correctAnswer": 1,
+      "explanation": "With dep type 'code', the referenced cell's data field directly contains the script binary. With dep type 'depGroup', the referenced cell's data contains a serialized list of OutPoints, each pointing to a separate code cell. depGroup is a convenience for bundling multiple script dependencies into a single reference."
+    },
+    {
+      "id": 7,
+      "question": "What are the six stages of a CKB transaction's lifecycle?",
+      "options": [
+        "Create, Broadcast, Validate, Mine, Confirm, Finalize",
+        "Construct, Sign, Submit, Pending, Proposed, Committed",
+        "Draft, Review, Approve, Execute, Verify, Archive",
+        "Build, Hash, Send, Queue, Process, Store"
+      ],
+      "correctAnswer": 1,
+      "explanation": "A CKB transaction goes through: (1) Construction (building inputs/outputs off-chain), (2) Signing (computing tx_hash and creating signatures), (3) Submission (sending to a node via RPC), (4) Pending (waiting in the mempool), (5) Proposed (included in a block's proposal zone), and (6) Committed (finalized in a block's commitment zone)."
+    },
+    {
+      "id": 8,
+      "question": "If you have a cell with 500 CKB and want to send 200 CKB to someone, what must your transaction do?",
+      "options": [
+        "Deduct 200 CKB from the cell's capacity field, leaving 300 CKB in place",
+        "Consume the entire 500 CKB cell and create two outputs: one with 200 CKB for the recipient and one with ~300 CKB as change back to yourself",
+        "Split the cell into two parts without consuming it",
+        "Send a message to the recipient's lock script to transfer 200 CKB"
+      ],
+      "correctAnswer": 1,
+      "explanation": "There is no partial consumption in CKB. You must consume the entire 500 CKB input cell and create output cells: one for the 200 CKB payment to the recipient and another returning the remaining capacity (minus the fee) back to yourself as 'change'. This is identical to how Bitcoin UTXO spending works."
+    }
+  ]
+}

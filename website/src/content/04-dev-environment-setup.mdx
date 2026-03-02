@@ -1,0 +1,352 @@
+# Setting Up Your Dev Environment
+
+## Overview
+
+Before you can build on CKB, you need a working development environment. In lessons 1-3 you learned the theory: cells, transactions, and capacity. Now it's time to get your hands dirty.
+
+In this lesson you will install the essential tools for CKB development, connect to the public testnet, and verify that everything works end-to-end. A properly configured environment means fewer surprises later when you start writing transactions and deploying scripts.
+
+We will set up:
+- **Node.js** and npm as our runtime and package manager
+- **CCC SDK** (`@ckb-ccc/core`) as our primary CKB interaction library
+- **OffCKB** (optional) for spinning up a local devnet
+- **CKB-CLI** (optional) for advanced node and wallet management
+
+By the end of this lesson, you will have a verified setup and a test address on the CKB testnet.
+
+## Prerequisites
+
+- A computer running macOS, Linux, or Windows (WSL recommended for Windows)
+- Basic terminal/command line knowledge (navigating directories, running commands)
+- Conceptual understanding from Lessons 1-3 (cells, transactions, capacity)
+
+## Key Tools
+
+### Node.js & npm
+
+**Node.js** is a JavaScript/TypeScript runtime that lets us run CKB scripts and interact with the blockchain from our local machine. npm (Node Package Manager) comes bundled with Node.js and manages our project dependencies.
+
+**Why Node.js?** The CKB ecosystem has excellent TypeScript/JavaScript tooling. The CCC SDK, which is the recommended library for CKB development, is a TypeScript-first library. Node.js >= 18 is required because it includes native support for modern JavaScript features we rely on (like top-level `await` and the Web Crypto API).
+
+**Recommended version:** Node.js 20 LTS (Long Term Support)
+
+### CCC SDK (@ckb-ccc/core)
+
+The **CCC SDK** (Common Chains Connector) is the recommended TypeScript/JavaScript SDK for CKB development. It provides a comprehensive toolkit:
+
+- **RPC Client** — Query chain state, submit transactions, fetch blocks and cells
+- **Transaction Builder** — Construct CKB transactions with proper input/output management
+- **Cell Collector** — Find cells by lock script, type script, or data content
+- **Signer Abstractions** — Manage keys and sign transactions across different wallet types
+- **Address Utilities** — Convert between addresses and scripts for different networks
+
+Install it as a project dependency:
+
+```bash
+npm install @ckb-ccc/core
+```
+
+Unlike some blockchain SDKs that require API keys or account setup, CCC can connect to public CKB nodes out of the box.
+
+### OffCKB (Optional but Recommended)
+
+**OffCKB** is a command-line tool that spins up a complete local CKB development network (devnet) with a single command. Think of it as your personal blockchain for testing.
+
+Why use a local devnet?
+- **Instant blocks** — No waiting for testnet confirmation times
+- **Pre-funded accounts** — Start testing immediately with accounts that already have CKBytes
+- **Clean resets** — Wipe the chain and start fresh whenever you need to
+- **Offline development** — No internet connection required
+- **Fast iteration** — Deploy and test scripts in seconds, not minutes
+
+Install OffCKB globally:
+
+```bash
+npm install -g @offckb/cli
+```
+
+Basic commands:
+
+```bash
+# Start a local CKB devnet node
+offckb node
+
+# List pre-funded accounts (20 accounts with CKBytes ready to use)
+offckb accounts
+
+# Show deployed system script hashes on the devnet
+offckb list-hashes
+```
+
+We won't use OffCKB in this lesson (we'll connect to the public testnet instead), but you'll find it invaluable in later lessons when you start deploying scripts and need fast feedback loops.
+
+### CKB-CLI (Optional)
+
+**CKB-CLI** is the official command-line tool for the CKB blockchain. It provides lower-level access to node operations, wallet management, and transaction building.
+
+Most students won't need CKB-CLI until later lessons (particularly Lesson 19: Running a Full Node). The CCC SDK covers the functionality you need for development. However, CKB-CLI is useful for:
+
+- Managing a full CKB node
+- Advanced wallet operations
+- Interacting with the Nervos DAO
+- Debugging transaction issues at the RPC level
+
+Install on macOS:
+
+```bash
+brew tap nervosnetwork/tap
+brew install ckb-cli
+```
+
+For other platforms, download from the [CKB-CLI releases page](https://github.com/nervosnetwork/ckb-cli/releases).
+
+## Step-by-Step Setup
+
+### Step 1: Install Node.js
+
+Choose the installation method for your operating system.
+
+**macOS (using nvm — recommended):**
+
+```bash
+# Install nvm (Node Version Manager)
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+
+# Reload your shell configuration
+source ~/.zshrc    # or ~/.bashrc on Linux
+
+# Install Node.js 20 LTS
+nvm install 20
+nvm use 20
+```
+
+**macOS (using Homebrew):**
+
+```bash
+brew install node
+```
+
+**Linux (using nvm):**
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+source ~/.bashrc
+nvm install 20
+nvm use 20
+```
+
+**Windows:**
+
+Download the LTS installer from [nodejs.org](https://nodejs.org/) and run it. Alternatively (recommended), install WSL first and follow the Linux instructions inside your WSL terminal.
+
+**Verify your installation:**
+
+```bash
+node --version    # Should output v18.x.x or higher
+npm --version     # Should output 9.x.x or higher
+```
+
+### Step 2: Create Your First CKB Project
+
+Let's set up the lesson project and install its dependencies:
+
+```bash
+# Navigate to the lesson directory
+cd lessons/04-dev-environment-setup
+
+# Install project dependencies (CCC SDK, TypeScript, tsx)
+npm install
+```
+
+The `package.json` defines three dependencies:
+- `@ckb-ccc/core` — The CCC SDK for CKB interaction
+- `typescript` — TypeScript compiler for type checking
+- `tsx` — A fast TypeScript runner (no separate compilation step needed)
+
+If you were starting a brand-new CKB project from scratch, you would do:
+
+```bash
+mkdir my-ckb-project
+cd my-ckb-project
+npm init -y
+npm install @ckb-ccc/core tsx typescript
+```
+
+### Step 3: Connect to Testnet
+
+Here's the core code that connects to the CKB public testnet using the CCC SDK:
+
+```typescript
+import { ccc } from "@ckb-ccc/core";
+
+// Create a client connected to the CKB public testnet.
+// This connects to the Pudge/Aggron testnet RPC endpoint.
+// No API key needed — it's a public endpoint.
+const client = new ccc.ClientPublicTestnet();
+
+// Verify connectivity by fetching the current chain tip
+const tipBlockNumber = await client.getTip();
+console.log("Connected! Current block height:", tipBlockNumber);
+
+// Fetch the tip block header for more details
+const tipHeader = await client.getHeaderByNumber(tipBlockNumber);
+if (tipHeader) {
+  const timestamp = new Date(Number(tipHeader.timestamp));
+  console.log("Latest block time:", timestamp.toISOString());
+}
+```
+
+**CKB Networks:**
+
+| Network | Name | Prefix | Use Case |
+|---------|------|--------|----------|
+| Mainnet | Lina | `ckb1` | Production — real CKBytes with real value |
+| Testnet | Pudge/Aggron | `ckt1` | Public testing — free CKBytes from faucet |
+| Devnet | Local | `ckt1` | Local development — instant blocks via OffCKB |
+
+The CCC SDK provides convenient client constructors for each:
+
+```typescript
+const mainnet = new ccc.ClientPublicMainnet();   // Mainnet (Lina)
+const testnet = new ccc.ClientPublicTestnet();    // Testnet (Pudge)
+// For devnet, point to your local node:
+// const devnet = new ccc.Client("http://localhost:8114");
+```
+
+### Step 4: Verify Your Setup
+
+Run the full verification script:
+
+```bash
+npm start
+```
+
+The script performs these checks in sequence:
+
+1. **Environment Check** — Verifies Node.js >= 18, npm, and optional tools
+2. **Testnet Connection** — Connects to the public CKB testnet RPC
+3. **Chain Info** — Fetches and displays current block height, epoch, and timing
+4. **Address Generation** — Creates a random test key and derives a testnet address
+5. **Balance Query** — Checks the balance of the test address (should be 0)
+6. **Summary** — Reports pass/fail for each step
+
+You should see output like:
+
+```
+  [PASS] Node.js (required)
+  [PASS] npm (required)
+  [SKIP] OffCKB CLI (optional)
+  [SKIP] CKB-CLI (optional)
+
+  All required tools are installed!
+
+  Tip block number : 12345678
+  ...
+  Address: ckt1qz...
+
+  All checks passed! Your environment is ready.
+```
+
+### Step 5: Get Testnet CKB (Faucet)
+
+Now that you have a verified setup and a testnet address, you'll want some test CKBytes for future lessons. The CKB testnet faucet distributes free test tokens.
+
+1. **Copy your test address** from the script output (it starts with `ckt1...`)
+2. **Visit the faucet** at [https://faucet.nervos.org/](https://faucet.nervos.org/)
+3. **Paste your address** into the input field
+4. **Complete the request** (you may need to solve a captcha)
+5. **Wait 2-3 minutes** for the faucet transaction to be confirmed on testnet
+
+> **Note:** The faucet sends a limited amount of testnet CKB per request. This is enough for testing. You can request more later if needed. For heavy testing, consider using OffCKB's pre-funded devnet accounts instead.
+
+Once the faucet transaction confirms, you can verify your balance by running the script again — this time it should show a non-zero balance.
+
+## Running the Exercise
+
+Here is the complete workflow to run this lesson's exercise:
+
+```bash
+# 1. Navigate to the lesson directory (from the project root)
+cd lessons/04-dev-environment-setup
+
+# 2. Install dependencies
+npm install
+
+# 3. Run the full verification script
+npm start
+
+# 4. (Optional) Run only the local environment check
+npm run check
+```
+
+The `npm start` command executes `src/index.ts`, which performs all six verification steps. The `npm run check` command runs `src/setup-check.ts` in standalone mode, which only checks local tools without making network calls.
+
+Take a few minutes to read through the source code in `src/index.ts` and `src/setup-check.ts`. The code is heavily commented to explain each step and the CKB concepts involved.
+
+## Troubleshooting
+
+### Network Timeouts
+
+If you see connection errors when reaching the testnet:
+- Check your internet connection
+- Try again in a few minutes — the public testnet RPC may be temporarily overloaded
+- If you're behind a corporate firewall or VPN, ensure HTTPS traffic to `testnet.ckb.dev` is allowed
+
+### Node.js Version Too Old
+
+The CCC SDK requires Node.js >= 18. Check your version:
+
+```bash
+node --version
+```
+
+If it's below v18, upgrade using nvm:
+
+```bash
+nvm install 20
+nvm use 20
+```
+
+### npm Permission Errors (EACCES)
+
+If you see permission errors installing global packages (like OffCKB):
+
+```bash
+mkdir -p ~/.npm-global
+npm config set prefix '~/.npm-global'
+export PATH=~/.npm-global/bin:$PATH
+# Add that export line to your ~/.bashrc or ~/.zshrc
+```
+
+### "Cannot find module" Errors
+
+This usually means dependencies aren't installed:
+
+```bash
+rm -rf node_modules
+npm install
+```
+
+### OffCKB Not Found After Install
+
+Ensure your npm global bin directory is in your PATH:
+
+```bash
+npm config get prefix
+# The bin directory is <prefix>/bin — add it to your PATH if missing
+```
+
+## Summary & What's Next
+
+In this lesson, you:
+
+- Installed **Node.js** and **npm** as your development runtime
+- Learned about the **CCC SDK** and why it's the go-to library for CKB development
+- Discovered **OffCKB** for local devnet development and **CKB-CLI** for advanced operations
+- Connected to the **CKB public testnet** and fetched live chain data
+- Generated a **test address** and learned how CKB addresses encode lock scripts
+- Checked an address **balance** by iterating over live cells
+- Learned about the **testnet faucet** for getting free test CKBytes
+- Understood the difference between **Mainnet, Testnet, and Devnet**
+
+Your environment is now ready for real CKB development. In **Lesson 5: Your First CKB Transfer**, you'll use this setup to build, sign, and submit your first CKB transaction on the testnet.

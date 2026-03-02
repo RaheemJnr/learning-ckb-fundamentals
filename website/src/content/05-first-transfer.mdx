@@ -1,0 +1,372 @@
+# Your First CKB Transfer
+
+## Overview
+
+In this lesson, you will build and send your first real CKB transfer transaction on the testnet. This is a milestone moment -- you are going from reading about CKB concepts to actually moving value on-chain. By the end, you will understand the complete lifecycle of a CKB transaction: construction, signing, submission, and confirmation.
+
+We will use the **CCC SDK** (Common Chains Connector), the official TypeScript SDK for interacting with CKB. The CCC SDK provides high-level abstractions that make it straightforward to build transactions while still giving you visibility into what is happening under the hood.
+
+## Prerequisites
+
+- Lessons 1-4 completed (Cell Model, Transaction Anatomy, Capacity Calculator, Dev Environment)
+- Node.js 18+ and TypeScript installed
+- A CKB testnet address funded with testnet CKB from the [faucet](https://faucet.nervos.org/)
+- Basic familiarity with async/await in TypeScript
+
+## Concepts
+
+### Building Transactions Programmatically
+
+In Lesson 2, you learned that CKB transactions consume existing cells (inputs) and create new cells (outputs). Now you will do this in code. Building a transaction programmatically involves several steps:
+
+1. **Define the outputs** -- what new cells do you want to create?
+2. **Select the inputs** -- which of your existing cells will you consume?
+3. **Calculate the fee** -- how much will you pay miners?
+4. **Add change** -- return leftover capacity to yourself
+5. **Sign** -- prove you are authorized to spend the inputs
+6. **Submit** -- send the signed transaction to the network
+
+The CCC SDK automates much of this through its transaction builder API, but understanding each step is crucial for building more complex applications later.
+
+### The CCC SDK Transaction Building API
+
+The CCC SDK provides a clean, composable API for building transactions. Here are the key classes and methods you will use:
+
+#### `ccc.ClientPublicTestnet`
+
+Creates a client connected to the CKB public testnet. The client handles all RPC communication.
+
+```typescript
+import { ccc } from "@ckb-ccc/core";
+
+const client = new ccc.ClientPublicTestnet();
+```
+
+#### `ccc.Transaction.from({})`
+
+Creates a new empty transaction object. You then populate it with outputs, inputs, and witnesses.
+
+```typescript
+const tx = ccc.Transaction.from({});
+```
+
+#### `tx.addOutput(cellOutput, data)`
+
+Adds an output cell to the transaction. You specify the lock script (who will own the cell) and optionally a type script and data.
+
+```typescript
+tx.addOutput(
+  { lock: recipientAddress.script },
+  "0x" // empty data
+);
+```
+
+#### `tx.completeFeeBy(signer)`
+
+This is the most powerful helper in the API. It:
+- Scans the signer's live cells to find enough input capacity
+- Adds those cells as inputs to the transaction
+- Creates a change output back to the signer
+- Calculates the appropriate transaction fee based on the serialized size
+
+```typescript
+await tx.completeFeeBy(signer);
+```
+
+#### `signer.signTransaction(tx)`
+
+Signs all inputs that belong to the signer. This adds witness data containing the cryptographic signature.
+
+```typescript
+await signer.signTransaction(tx);
+```
+
+#### `client.sendTransaction(tx)`
+
+Submits the signed transaction to the network and returns the transaction hash.
+
+```typescript
+const txHash = await client.sendTransaction(tx);
+```
+
+### Creating Signers and Managing Keys
+
+A **signer** is an abstraction that represents an entity capable of signing transactions. The CCC SDK supports several signer types:
+
+| Signer Type | Use Case |
+|-------------|----------|
+| `SignerCkbPrivateKey` | Direct private key signing (scripts, testing) |
+| `SignerCkbPublicKey` | External signing with known public key |
+| Hardware wallet signers | Production applications |
+
+For this lesson, we use `SignerCkbPrivateKey`, which takes a raw secp256k1 private key:
+
+```typescript
+const signer = new ccc.SignerCkbPrivateKey(client, privateKey);
+```
+
+When you create a signer, it automatically:
+1. Derives the **secp256k1 public key** from the private key
+2. Computes the **blake160 hash** of the public key (first 20 bytes of the blake2b-256 hash)
+3. Constructs the **lock script** using the default secp256k1-blake160 lock:
+   - `code_hash`: the hash of the secp256k1-blake160 lock script code
+   - `hash_type`: "type"
+   - `args`: the blake160 hash of the public key
+4. Encodes this lock script as a **CKB address** (Bech32 format)
+
+You can retrieve the address and balance:
+
+```typescript
+const address = await signer.getInternalAddress();
+const balance = await signer.getBalance(); // in shannons
+```
+
+### The Transaction Signing Process
+
+Signing a CKB transaction is a multi-step cryptographic process:
+
+**Step 1: Serialize the transaction.** The transaction (without witnesses) is serialized into bytes using the Molecule serialization format -- CKB's canonical binary encoding.
+
+**Step 2: Compute the signing message.** A blake2b-256 hash is computed over:
+- The transaction hash (hash of the serialized transaction without witnesses)
+- The witness data for the signing group
+- Any additional witness data
+
+**Step 3: Sign with secp256k1.** The signing message is signed using the ECDSA algorithm with the secp256k1 curve (the same curve Bitcoin uses). This produces a 65-byte recoverable signature.
+
+**Step 4: Pack the signature into witnesses.** The signature is placed in the `lock` field of a `WitnessArgs` structure, which is then serialized and stored in the transaction's witnesses array.
+
+**Step 5: Verification (by the network).** When the transaction is verified, each input's lock script executes in the CKB-VM. The default secp256k1-blake160 lock script:
+- Extracts the signature from the witness
+- Recovers the public key from the signature and message
+- Computes blake160 of the recovered public key
+- Compares it to the `args` field of the lock script
+- If they match, the input is authorized
+
+### Submitting Transactions to the Network
+
+When you call `client.sendTransaction(tx)`, the following happens:
+
+1. **Serialization**: The transaction is serialized to the Molecule binary format
+2. **RPC Call**: The serialized transaction is sent to a CKB node via the `send_transaction` JSON-RPC method
+3. **Local Validation**: The receiving node validates the transaction:
+   - Are all referenced input cells live (unspent)?
+   - Do all lock scripts pass? (authorization check)
+   - Do all type scripts pass? (state transition validation)
+   - Is the total input capacity >= total output capacity?
+   - Is the transaction size within limits?
+4. **Mempool Admission**: If valid, the transaction enters the node's mempool (transaction pool)
+5. **Propagation**: The node broadcasts the transaction to its peers
+6. **Return**: The transaction hash is returned to the caller
+
+If any validation step fails, an error is thrown with details about what went wrong.
+
+### Waiting for Confirmations
+
+After a transaction is submitted, it goes through several states:
+
+```
+pending  -->  proposed  -->  committed
+(mempool)    (in proposal)   (in a block)
+```
+
+- **Pending**: The transaction is in the mempool, waiting for a miner to include it
+- **Proposed**: A miner has proposed the transaction for inclusion (CKB's two-step confirmation)
+- **Committed**: The transaction is included in a confirmed block
+
+You can poll the transaction status using `client.getTransaction(txHash)`:
+
+```typescript
+const response = await client.getTransaction(txHash);
+if (response && response.status === "committed") {
+  console.log("Confirmed in block:", response.blockHash);
+}
+```
+
+CKB's average block time is 8-12 seconds on testnet. For testnet transactions, 1 confirmation is typically sufficient. For mainnet transactions involving significant value, waiting for 10-24 confirmations provides stronger finality guarantees.
+
+### Understanding Transaction Receipts
+
+Unlike Ethereum, CKB does not have explicit "transaction receipts." Instead, you query the transaction status and inspect the transaction data itself:
+
+```typescript
+const txResponse = await client.getTransaction(txHash);
+```
+
+The response includes:
+- **`status`**: The transaction lifecycle state ("pending", "proposed", "committed", "rejected")
+- **`transaction`**: The full transaction data (inputs, outputs, witnesses)
+- **`blockHash`**: The hash of the block containing the transaction (once committed)
+
+To verify a transfer was successful, you can:
+1. Check that `status === "committed"`
+2. Inspect the output cells to confirm the recipient received the expected amount
+3. Query the recipient's balance to see the increase
+
+## Step-by-Step Tutorial
+
+Let's walk through the complete code in `lessons/05-first-transfer/src/index.ts`.
+
+### Step 1: Set Up the Project
+
+```bash
+cd lessons/05-first-transfer
+npm install
+```
+
+This installs the CCC SDK (`@ckb-ccc/core`), the TypeScript runtime (`tsx`), and TypeScript itself.
+
+### Step 2: Connect to Testnet
+
+```typescript
+import { ccc } from "@ckb-ccc/core";
+
+const client = new ccc.ClientPublicTestnet();
+```
+
+The `ClientPublicTestnet` connects to the CKB Pudge testnet through public RPC endpoints. No API keys or configuration needed.
+
+### Step 3: Create a Signer
+
+```typescript
+const SENDER_PRIVATE_KEY = "0xd6013cd867d286ef84cc300ac6546013837df2b06c9f53c83b4c33c2417f6a07";
+
+const signer = new ccc.SignerCkbPrivateKey(client, SENDER_PRIVATE_KEY);
+const senderAddress = await signer.getInternalAddress();
+```
+
+This creates a signer from a test private key. The signer derives the corresponding CKB testnet address automatically. Fund this address using the [testnet faucet](https://faucet.nervos.org/) before running the script.
+
+### Step 4: Check the Balance
+
+```typescript
+const balanceBefore = await signer.getBalance();
+```
+
+`getBalance()` returns the total capacity of all live cells owned by the signer, measured in shannons (1 CKB = 10^8 shannons).
+
+### Step 5: Build the Transaction
+
+```typescript
+// Parse the recipient address
+const recipientAddress = await ccc.Address.fromString(RECIPIENT_ADDRESS, client);
+
+// Create an empty transaction
+const tx = ccc.Transaction.from({});
+
+// Add the transfer output
+tx.addOutput({ lock: recipientAddress.script }, "0x");
+tx.outputs[0].capacity = TRANSFER_AMOUNT_SHANNONS;
+```
+
+Here we create a new cell for the recipient. The cell's lock script comes from the recipient's address, and the capacity is set to the transfer amount.
+
+### Step 6: Complete the Transaction
+
+```typescript
+await tx.completeFeeBy(signer);
+```
+
+This single call does the heavy lifting:
+- Selects input cells from the signer that provide enough capacity
+- Adds a change output back to the signer
+- Calculates the fee based on transaction size
+
+After this call, the transaction has all inputs, all outputs (including change), and the correct fee baked in.
+
+### Step 7: Sign and Send
+
+```typescript
+// Sign
+await signer.signTransaction(tx);
+
+// Send
+const txHash = await client.sendTransaction(tx);
+```
+
+Signing adds the cryptographic proof to the witnesses. Sending submits it to the network and returns the transaction hash.
+
+### Step 8: Wait for Confirmation
+
+```typescript
+while (/* within timeout */) {
+  const txResponse = await client.getTransaction(txHash);
+  if (txResponse && txResponse.status === "committed") {
+    console.log("Confirmed!");
+    break;
+  }
+  await sleep(3000);
+}
+```
+
+We poll every 3 seconds until the transaction reaches "committed" status or we time out.
+
+### Step 9: Verify the Result
+
+```typescript
+const balanceAfter = await signer.getBalance();
+console.log("Difference:", formatCkb(balanceBefore - balanceAfter));
+```
+
+The balance difference should equal the transfer amount plus the small transaction fee.
+
+## Running the Code
+
+```bash
+cd lessons/05-first-transfer
+npm install
+npm start
+```
+
+Make sure the sender address has testnet CKB before running. The script will print the sender address at startup -- copy it and use the [faucet](https://faucet.nervos.org/) if needed.
+
+## Security Best Practices
+
+Working with private keys requires extreme caution. Here are the rules you should always follow:
+
+### Never Hardcode Private Keys
+
+The demo in this lesson hardcodes a private key for educational simplicity. In any real application:
+
+```typescript
+// BAD - never do this in production
+const key = "0xabc123...";
+
+// GOOD - use environment variables
+const key = process.env.CKB_PRIVATE_KEY;
+
+// BETTER - use a keystore file with password
+const key = await loadKeystore("./keystore.json", password);
+
+// BEST - use a hardware wallet or secure enclave
+const signer = new HardwareWalletSigner(client);
+```
+
+### Never Commit Keys to Version Control
+
+Add private key files and `.env` files to your `.gitignore`. If you accidentally commit a key, consider it compromised and rotate immediately.
+
+### Never Reuse Testnet Keys on Mainnet
+
+Test keys are publicly shared and should be considered compromised. Always generate fresh keys for mainnet use.
+
+### Use Separate Keys for Different Purposes
+
+Maintain different keys for development, testing, staging, and production. Never mix them.
+
+## Summary
+
+In this lesson, you accomplished a significant milestone -- sending your first CKB transaction programmatically. Here is what you learned:
+
+- **CCC SDK Setup**: How to connect to testnet and create signers
+- **Transaction Building**: Creating transactions with outputs, inputs, change, and fees using the CCC SDK's builder API
+- **Transaction Signing**: How the secp256k1-blake160 signing process works and how it proves ownership
+- **Transaction Submission**: What happens when you send a transaction to the network (validation, mempool, propagation)
+- **Confirmation Tracking**: How to poll for transaction status and what "committed" means
+- **Key Management**: Why you must never hardcode private keys and what alternatives exist
+
+The transfer you just performed is the foundation for everything else in CKB development. Every DApp interaction, token transfer, NFT mint, and smart contract call is fundamentally a transaction that consumes and creates cells. Now that you understand the mechanics, you are ready to explore more advanced topics like cell inspection (Lesson 6), custom scripts (Lesson 7), and beyond.
+
+## What's Next
+
+In Lesson 6, we will build a Cell Explorer that lets you inspect live cells on-chain, query cells by lock script, and understand the data stored within them. This will deepen your understanding of how the state you just created with your transfer actually looks on the blockchain.

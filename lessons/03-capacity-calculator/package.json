@@ -1,0 +1,23 @@
+{
+  "name": "03-capacity-calculator",
+  "version": "1.0.0",
+  "description": "CKB Capacity Calculator - Learn how CKBytes fund on-chain storage and explore CKB tokenomics",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "npx tsx src/index.ts",
+    "dev": "npx tsx watch src/index.ts"
+  },
+  "keywords": [
+    "ckb",
+    "nervos",
+    "capacity",
+    "tokenomics",
+    "blockchain"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@ckb-ccc/core": "^0.0.16-alpha.2",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}

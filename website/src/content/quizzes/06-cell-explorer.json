@@ -1,0 +1,101 @@
+{
+  "lessonId": 6,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What is the difference between a live cell and a dead cell in CKB?",
+      "options": [
+        "Live cells have data, dead cells have no data",
+        "Live cells exist in the current state and can be spent; dead cells have been consumed as transaction inputs",
+        "Live cells are on mainnet, dead cells are on testnet",
+        "Live cells have type scripts, dead cells do not"
+      ],
+      "correctAnswer": 1,
+      "explanation": "A live cell is one that has been created as a transaction output but not yet consumed. A dead cell has been used as an input in a subsequent transaction and no longer exists in the current blockchain state. This mirrors Bitcoin's UTXO model: live cells are unspent outputs, dead cells are spent outputs."
+    },
+    {
+      "id": 2,
+      "question": "Which CCC SDK method would you use to find all cells owned by a specific address?",
+      "options": [
+        "client.findCellsByType(lockScript)",
+        "client.findCellsByLock(lockScript)",
+        "client.getCellLive(lockScript)",
+        "client.getBalanceSingle(lockScript)"
+      ],
+      "correctAnswer": 1,
+      "explanation": "findCellsByLock() searches for cells by their lock script, which determines ownership. An address encodes a lock script, so querying by lock script finds all cells owned by that address. findCellsByType() searches by type script (contract), getCellLive() checks a specific cell, and getBalanceSingle() returns only the total capacity without individual cells."
+    },
+    {
+      "id": 3,
+      "question": "What does the CKB indexer track?",
+      "options": [
+        "All transactions ever created on the blockchain",
+        "Only dead cells that have been consumed",
+        "The current set of live cells, organized by their scripts for efficient querying",
+        "Block headers and consensus information"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The CKB indexer tracks the current set of live cells and organizes them by their lock scripts and type scripts. This allows efficient queries like 'find all cells owned by address X' or 'find all cells of token type Y'. The full node stores the complete blockchain history, but the indexer focuses only on the current live cell set."
+    },
+    {
+      "id": 4,
+      "question": "When using the outputCapacityRange filter, what does the range [100, 500) mean?",
+      "options": [
+        "Cells with capacity from 100 to 500 inclusive",
+        "Cells with capacity from 100 inclusive to 500 exclusive",
+        "Cells with capacity less than 100 or greater than 500",
+        "Cells with exactly 100 or 500 capacity"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB indexer ranges use [inclusive, exclusive) semantics, similar to Python's range(). So [100, 500) matches cells with capacity >= 100 and capacity < 500. A cell with exactly 500 capacity would NOT be included."
+    },
+    {
+      "id": 5,
+      "question": "What is the purpose of querying cells by type script?",
+      "options": [
+        "To find cells owned by a specific address",
+        "To find all cells governed by a specific smart contract, regardless of owner",
+        "To check if a cell is live or dead",
+        "To calculate the transaction fee"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Querying by type script finds all cells governed by a particular smart contract, regardless of who owns them. This is useful for finding all UDT tokens of a specific type, all NFTs from a collection, or all Nervos DAO deposit cells. Lock script queries find cells by owner, while type script queries find cells by contract."
+    },
+    {
+      "id": 6,
+      "question": "Why does the CCC SDK use async generators (AsyncGenerator<Cell>) for cell query results?",
+      "options": [
+        "Because JavaScript requires all iterators to be async",
+        "To stream results lazily from the indexer without loading everything into memory at once",
+        "Because cells can only be accessed one at a time due to blockchain limitations",
+        "To prevent race conditions in multi-threaded environments"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Async generators allow results to be fetched in batches from the CKB indexer as you iterate, rather than loading potentially thousands of cells into memory at once. This is memory-efficient and allows you to break early when you find what you need. Behind the scenes, CCC handles pagination automatically."
+    },
+    {
+      "id": 7,
+      "question": "Which data search modes does the CKB indexer support for the outputData filter?",
+      "options": [
+        "regex, glob, and wildcard",
+        "prefix, exact, and partial",
+        "startsWith, endsWith, and contains",
+        "equal, notEqual, and greaterThan"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The CKB indexer supports three data search modes: 'prefix' (data starts with the given bytes), 'exact' (data matches exactly), and 'partial' (data contains the given bytes anywhere). These modes let you search for cells with specific data patterns, such as UDT balances, magic number headers, or Nervos DAO deposit markers."
+    },
+    {
+      "id": 8,
+      "question": "What is the most efficient way to get the total CKB balance for an address without iterating through every cell?",
+      "options": [
+        "Use findCellsByLock and sum the capacities manually",
+        "Use findCellsPaged and aggregate across all pages",
+        "Use getBalanceSingle(lockScript) which computes the sum on the indexer side",
+        "Use getCellLive on each known outpoint"
+      ],
+      "correctAnswer": 2,
+      "explanation": "getBalanceSingle(lockScript) uses the indexer's getCellsCapacity RPC method, which computes the total capacity server-side without transferring individual cell data over the network. This is much faster than iterating through all cells, especially for addresses with hundreds or thousands of cells."
+    }
+  ]
+}

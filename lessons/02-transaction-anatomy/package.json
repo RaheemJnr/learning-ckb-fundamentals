@@ -1,0 +1,15 @@
+{
+  "name": "02-transaction-anatomy",
+  "version": "1.0.0",
+  "description": "Lesson 2: Understand CKB transaction structure - inputs, outputs, cell deps, and witnesses",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "npx tsx src/index.ts",
+    "dev": "npx tsx --watch src/index.ts"
+  },
+  "dependencies": {
+    "@ckb-ccc/core": "latest",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "04-dev-environment-setup",
+  "version": "1.0.0",
+  "description": "Lesson 4: Set up your CKB development environment, verify tools, and connect to testnet",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "npx tsx src/index.ts",
+    "dev": "npx tsx --watch src/index.ts",
+    "check": "npx tsx src/setup-check.ts"
+  },
+  "dependencies": {
+    "@ckb-ccc/core": "latest",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

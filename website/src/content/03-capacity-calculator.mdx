@@ -1,0 +1,371 @@
+# CKB Tokenomics & Capacity
+
+## Overview
+
+In this lesson, you will learn how CKBytes (the native token of Nervos CKB) serve a **dual purpose**: they are both the network's cryptocurrency and a direct representation of on-chain storage space. You will build a capacity calculator that shows exactly how many CKBytes are needed to store different types of data on-chain, and explore the full CKB economic model including primary issuance, secondary issuance, and the Nervos DAO.
+
+## Prerequisites
+
+- Lesson 01: Understanding of the Cell Model (cells, capacity, lock/type scripts, data)
+- Lesson 02: Understanding of CKB transaction structure (inputs, outputs)
+- Node.js installed on your machine
+- Basic TypeScript/JavaScript familiarity
+
+## Concepts
+
+### CKByte: Token and Storage Unit
+
+The most important concept in CKB economics is the **dual purpose** of the CKByte:
+
+1. **Native Token** - CKBytes are the cryptocurrency used to pay transaction fees, transfer value, and participate in the network economy
+2. **Storage Unit** - 1 CKByte grants the right to store exactly 1 byte of data on-chain
+
+This means that if you want to store 100 bytes of data on the blockchain, you must lock at least 100 CKBytes in the cell that holds that data. When you no longer need the data, you can destroy the cell and **recover all of your CKBytes**. This is fundamentally different from Ethereum, where gas is burned and gone forever.
+
+> **Think of it this way:** CKBytes are like land in a city. You buy land (CKBytes) to build on it (store data). The land is not consumed — if you tear down the building, you still own the land and can sell it or use it elsewhere.
+
+### 1 CKByte = 1 Byte of Storage
+
+The relationship is elegantly simple:
+
+| CKBytes Locked | Storage Available |
+|---|---|
+| 61 CKBytes | 61 bytes (minimum cell) |
+| 100 CKBytes | 100 bytes |
+| 1,000 CKBytes | 1,000 bytes (~1 KB) |
+| 1,000,000 CKBytes | 1,000,000 bytes (~1 MB) |
+
+The smallest unit of CKByte is called a **shannon** (named after Claude Shannon), where:
+
+```
+1 CKByte = 100,000,000 shannons (10^8)
+```
+
+This is analogous to Bitcoin's satoshi (1 BTC = 10^8 satoshis).
+
+### Minimum Cell Capacity: 61 Bytes
+
+Every cell on CKB must satisfy a critical constraint:
+
+```
+capacity_value >= total_size_of_cell_in_bytes
+```
+
+Even the simplest possible cell (with no data and no type script) requires space for:
+
+- **Capacity field**: 8 bytes (a 64-bit unsigned integer)
+- **Lock script**: 53 bytes for the default SECP256K1-BLAKE160 lock
+  - `code_hash`: 32 bytes
+  - `hash_type`: 1 byte
+  - `args`: 20 bytes (the Blake160 hash of your public key)
+
+**Total: 8 + 53 = 61 bytes = 61 CKBytes minimum**
+
+This means you cannot create a cell on CKB with fewer than 61 CKBytes. This minimum ensures that every cell has enough capacity to store its own metadata.
+
+### Capacity Calculation Formula
+
+The full formula for calculating a cell's required capacity is:
+
+```
+Required Capacity (bytes) =
+    8                       (capacity field - always present)
+  + lock_script_size        (code_hash + hash_type + args)
+  + type_script_size        (optional: code_hash + hash_type + args)
+  + data_size               (arbitrary data stored in the cell)
+```
+
+In TypeScript, this looks like:
+
+```typescript
+function calculateMinCapacity(
+  dataLength: number,
+  hasTypeScript: boolean,
+  lockArgsSize: number = 20,
+  typeArgsSize: number = 20
+): bigint {
+  // Capacity field: always 8 bytes
+  let bytes = 8;
+
+  // Lock script: code_hash(32) + hash_type(1) + args(variable)
+  bytes += 32 + 1 + lockArgsSize;
+
+  // Type script (optional): code_hash(32) + hash_type(1) + args(variable)
+  if (hasTypeScript) {
+    bytes += 32 + 1 + typeArgsSize;
+  }
+
+  // Data field
+  bytes += dataLength;
+
+  // 1 CKByte = 1 byte = 10^8 shannons
+  return BigInt(bytes) * 100_000_000n;
+}
+```
+
+Here are common examples:
+
+| Cell Type | Data | Type Script | Total Bytes | CKBytes Required |
+|---|---|---|---|---|
+| Empty cell | 0 bytes | No | 61 | 61 |
+| Hash anchor | 32 bytes | No | 93 | 93 |
+| Token cell (xUDT) | 16 bytes | Yes (20-byte args) | 130 | 130 |
+| Token cell (xUDT) | 16 bytes | Yes (32-byte args) | 142 | 142 |
+| DAO deposit | 8 bytes | Yes (0-byte args) | 102 | 102 |
+| 1 KB data cell | 1,024 bytes | No | 1,085 | 1,085 |
+
+### Primary Issuance: The Hard Cap
+
+CKB's primary issuance follows a **Bitcoin-like halving schedule** with a hard cap:
+
+- **Hard Cap**: 33,600,000,000 CKBytes (33.6 billion)
+- **Halving Interval**: Every 8,760 epochs (approximately 4 years)
+- **Epoch Duration**: Approximately 4 hours
+
+The halving schedule:
+
+| Period | Approximate Years | Annual Issuance | Purpose |
+|---|---|---|---|
+| 1 | Years 0-4 | ~4,608,000,000 CKB | Initial mining rewards |
+| 2 | Years 4-8 | ~2,304,000,000 CKB | Halved rewards |
+| 3 | Years 8-12 | ~1,152,000,000 CKB | Further reduction |
+| 4 | Years 12-16 | ~576,000,000 CKB | Approaching cap |
+| ... | ... | Approaches zero | Fully mined at 33.6B |
+
+Primary issuance rewards miners for securing the network through Proof-of-Work consensus using the **Eaglesong** hash function. As the primary issuance decreases over time, miners increasingly rely on transaction fees and their share of secondary issuance.
+
+### Secondary Issuance: State Rent
+
+Secondary issuance is what makes CKB's economic model unique. It is a **fixed, perpetual** issuance that never halves and never stops:
+
+- **Amount**: 1,344,000,000 CKBytes per year (1.344 billion)
+- **Duration**: Forever (no cap, no halving)
+
+The secondary issuance is distributed based on how CKBytes in the network are being used:
+
+1. **CKBytes occupying state** (locked in cells storing data) - Their proportional share of secondary issuance goes to **miners**. This is the "state rent" mechanism: if you are using on-chain storage, you are effectively paying miners over time through the dilution of your locked CKBytes.
+
+2. **CKBytes deposited in Nervos DAO** - Their proportional share goes back to **DAO depositors**. This exactly compensates for the inflation, making DAO depositors immune to dilution from secondary issuance.
+
+3. **Liquid CKBytes** (not in cells, not in DAO) - Their proportional share goes to the **treasury fund** (currently burned until governance activates it).
+
+This creates a powerful economic dynamic:
+
+> If you store data on-chain, you pay implicit rent through inflation. If you do not need storage, you can deposit in the DAO and pay nothing. This makes on-chain storage a priced resource with a real ongoing cost, preventing the unbounded state growth that plagues other blockchains.
+
+### Nervos DAO: The Inflation Shelter
+
+The Nervos DAO is a special system smart contract deployed at CKB's genesis. It serves as an **inflation shelter** for CKByte holders who do not need to use their tokens for storage.
+
+**How it works:**
+
+1. **Deposit**: Lock your CKBytes in the Nervos DAO smart contract
+2. **Wait**: There is a minimum lock period of approximately 180 epochs (~30 days)
+3. **Withdraw**: Retrieve your CKBytes plus compensation from secondary issuance
+
+**Compensation calculation:**
+
+The DAO tracks a cumulative **Accumulated Rate (AR)** value that increases every epoch based on secondary issuance:
+
+```
+Compensation = deposited_amount * (AR_withdraw / AR_deposit - 1)
+```
+
+Where:
+- `AR_deposit` is the Accumulated Rate at the epoch of your deposit
+- `AR_withdraw` is the Accumulated Rate at the epoch you withdraw
+
+**Example:**
+
+```
+Deposit:         100,000 CKBytes
+AR at deposit:   1.0200
+AR at withdraw:  1.0350 (after ~6 months)
+
+Compensation = 100,000 * (1.0350 / 1.0200 - 1)
+             = 100,000 * 0.01471
+             = ~1,471 CKBytes earned
+```
+
+The effective APY depends on network conditions (how much of the supply is in the DAO vs occupying state), but typically ranges from approximately 2-3%.
+
+### Economic Model Comparison: CKB vs Ethereum
+
+| Aspect | Ethereum (Gas Model) | CKB (Capacity Model) |
+|---|---|---|
+| **Storage Payment** | One-time gas fee | Lock CKBytes for duration of storage |
+| **Data Persistence** | Permanent once written; no ongoing cost | Ongoing cost via secondary issuance dilution |
+| **State Cleanup** | No incentive to remove old data | Strong incentive: recover locked CKBytes |
+| **State Bloat** | Major problem; state grows unbounded | Controlled: storage is a priced resource |
+| **Token Utility** | Gas fees + staking (post-Merge) | Storage rights + native token + DAO yield |
+| **Inflation Model** | Deflationary (EIP-1559 burn) | Primary halves; secondary is perpetual but offset by DAO |
+| **Who Pays for State?** | All node operators (infrastructure cost) | Only those occupying state (via dilution) |
+
+The key insight is that CKB makes **state a first-class economic resource**. On Ethereum, once data is stored on-chain, it persists forever with no ongoing cost to the data owner, but every full node must bear the burden of storing it. On CKB, the data owner pays an ongoing implicit cost (dilution from secondary issuance), and can free the storage to recover their CKBytes at any time.
+
+## Step-by-Step Tutorial
+
+In this lesson's project, we build a CLI capacity calculator. Let us walk through the key parts of the code.
+
+### Step 1: Set up the project
+
+```bash
+cd lessons/03-capacity-calculator
+npm install
+```
+
+The project uses `@ckb-ccc/core` for CKB type definitions, `tsx` for running TypeScript directly, and `typescript` for type checking.
+
+### Step 2: Define the constants
+
+The calculator starts by defining the fundamental constants of CKB's storage and economic model:
+
+```typescript
+// 1 CKByte = 10^8 shannons (like satoshis in Bitcoin)
+const SHANNONS_PER_CKBYTE = 100_000_000n;
+
+// The capacity field is always 8 bytes (u64)
+const CAPACITY_FIELD_SIZE = 8;
+
+// Default SECP256K1-BLAKE160 lock script: 32 + 1 + 20 = 53 bytes
+const DEFAULT_LOCK_SCRIPT_SIZE = {
+  codeHash: 32,   // Blake2b hash of the lock script binary
+  hashType: 1,    // "type" or "data" indicator
+  args: 20,       // Blake160 hash of the public key
+};
+
+// Secondary issuance: fixed at 1.344B CKBytes per year
+const SECONDARY_ISSUANCE = {
+  annualCKB: 1_344_000_000n,
+};
+```
+
+### Step 3: Build the capacity calculator
+
+The core function calculates the exact byte cost of any cell configuration:
+
+```typescript
+function calculateCapacity(
+  dataSize: number,
+  hasTypeScript: boolean = false,
+  lockArgsSize: number = 20,
+  typeArgsSize: number = 20
+): CapacityBreakdown {
+  const capacityFieldBytes = 8;  // Always present
+  const lockScriptBytes = 32 + 1 + lockArgsSize;
+  const typeScriptBytes = hasTypeScript ? 32 + 1 + typeArgsSize : 0;
+  const dataBytes = dataSize;
+
+  const totalBytes = capacityFieldBytes + lockScriptBytes
+    + typeScriptBytes + dataBytes;
+
+  const totalShannons = BigInt(totalBytes) * SHANNONS_PER_CKBYTE;
+
+  return {
+    capacityFieldBytes,
+    lockScriptBytes,
+    typeScriptBytes,
+    dataBytes,
+    totalBytes,
+    totalShannons,
+    totalCKBytes: totalBytes,
+  };
+}
+```
+
+### Step 4: Calculate real-world examples
+
+The calculator walks through five practical scenarios:
+
+```typescript
+// Example 1: Minimal cell — 61 CKBytes
+const minimal = calculateCapacity(0, false);
+// 8 (capacity) + 53 (lock) = 61 bytes
+
+// Example 2: Store a 32-byte hash — 93 CKBytes
+const hashCell = calculateCapacity(32, false);
+// 8 + 53 + 32 = 93 bytes
+
+// Example 3: xUDT token cell — 130 CKBytes
+const tokenCell = calculateCapacity(16, true, 20, 20);
+// 8 + 53 + 53 + 16 = 130 bytes
+
+// Example 4: 1 KB data cell — 1,085 CKBytes
+const dataCell = calculateCapacity(1024, false);
+// 8 + 53 + 1024 = 1,085 bytes
+
+// Example 5: Nervos DAO deposit cell — 102 CKBytes
+const daoCell = calculateCapacity(8, true, 20, 0);
+// 8 + 53 + 33 + 8 = 102 bytes
+```
+
+Each example demonstrates a real use case: anchoring hashes on-chain, holding fungible tokens, storing data blobs, or depositing into the Nervos DAO.
+
+### Step 5: Model the Nervos DAO compensation
+
+The calculator includes a DAO compensation estimator:
+
+```typescript
+function calculateDAOCompensation(
+  depositCKB: bigint,
+  durationDays: number,
+  totalCirculatingCKB: bigint = 44_000_000_000n,
+  totalOccupiedCKB: bigint = 10_000_000_000n,
+  totalDAODepositCKB: bigint = 6_000_000_000n
+) {
+  const annualSecondary = 1_344_000_000n;
+
+  // DAO's share = (DAO deposits / total supply) * annual secondary
+  const daoShareRatio =
+    Number(totalDAODepositCKB) / Number(totalCirculatingCKB);
+  const daoAnnualCKB = Number(annualSecondary) * daoShareRatio;
+
+  // Your share = (your deposit / total DAO deposits) * DAO annual
+  const yourAnnualCKB =
+    daoAnnualCKB * (Number(depositCKB) / Number(totalDAODepositCKB));
+
+  // Prorate for actual duration
+  const compensation = yourAnnualCKB * (durationDays / 365);
+
+  return Math.round(compensation);
+}
+```
+
+This shows how the DAO redistributes secondary issuance back to depositors, effectively shielding them from inflation.
+
+### Step 6: Run the full calculator
+
+```bash
+npx tsx src/index.ts
+```
+
+The program outputs:
+1. Five detailed capacity calculation examples with byte-by-byte breakdowns
+2. A reference table showing capacity requirements for various data sizes
+3. A complete tokenomics overview (primary and secondary issuance)
+4. An economic comparison between CKB and Ethereum
+5. Nervos DAO compensation estimates for multiple deposit scenarios
+
+## Running the Code
+
+The complete project code is in the `lessons/03-capacity-calculator` directory. To run it:
+
+```bash
+cd lessons/03-capacity-calculator
+npm install
+npx tsx src/index.ts
+```
+
+## Real-World Examples
+
+- **Nervos DAO**: Deposit CKBytes to earn secondary issuance compensation. View deposits on [CKB Explorer](https://explorer.nervos.org)
+- **State Rent**: CKB's capacity model is a form of state rent — occupying on-chain storage has an ongoing cost, incentivizing efficient use of blockchain space
+- **CKB Tokenomics RFC**: The full economic design is detailed in [RFC 0015](https://github.com/nervosnetwork/rfcs/blob/master/rfcs/0015-ckb-cryptoeconomics/0015-ckb-cryptoeconomics.md)
+
+## Summary
+
+CKB's economic model is built around a fundamental insight: **on-chain storage should be a priced resource with an ongoing cost**. The CKByte achieves this by serving as both the native token and a storage unit (1 CKByte = 1 byte). Primary issuance follows a Bitcoin-like halving schedule with a 33.6 billion hard cap. Secondary issuance (1.344 billion CKBytes per year, perpetual) functions as implicit state rent, with miners receiving the share attributed to CKBytes occupying state. The Nervos DAO shelters holders from this inflation, creating a clean separation between those who use storage (and pay for it) and those who hold the token as a store of value. This design solves the "state bloat" problem that plagues Ethereum and other blockchains by giving users a direct economic incentive to free up storage when it is no longer needed.
+
+## What's Next
+
+In the next lesson, we will set up a complete CKB development environment with a local devnet, the CCC SDK, and the essential tools you need to start building on CKB.

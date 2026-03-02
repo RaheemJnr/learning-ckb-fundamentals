@@ -6,40 +6,40 @@
       "question": "What are the four fields of a CKB Cell?",
       "options": [
         "address, balance, nonce, storage",
-        "capacity, lock, type, data",
+        "capacity, data, lock, type",
         "input, output, witness, header",
         "hash, index, since, args"
       ],
       "correctAnswer": 1,
-      "explanation": "Every CKB cell has four fields: capacity (storage size and CKByte value), lock (ownership script), type (optional validation script), and data (arbitrary bytes)."
+      "explanation": "Every CKB cell has exactly four fields: capacity (the CKByte value and max storage size), data (arbitrary bytes), lock (a script controlling ownership), and type (an optional script controlling validation rules). These four fields together make cells far more powerful than Bitcoin UTXOs while maintaining the UTXO model's security properties."
     },
     {
       "id": 2,
-      "question": "What dual purpose does the 'capacity' field serve in a CKB cell?",
+      "question": "What does the 'capacity' field represent in a CKB cell?",
       "options": [
-        "It stores the gas limit and gas price",
-        "It defines the block number and timestamp",
-        "It represents both the CKByte value and the maximum cell size in bytes",
-        "It specifies the lock script hash and type script hash"
+        "Only the transaction fee required to create the cell",
+        "The maximum number of transactions the cell can participate in",
+        "Both the CKByte token value AND the maximum on-chain storage size in bytes",
+        "The computational gas limit for executing the cell's scripts"
       ],
       "correctAnswer": 2,
-      "explanation": "Capacity has a dual purpose: it represents the amount of CKBytes stored in the cell AND defines the maximum number of bytes the cell can occupy on-chain. This creates an elegant state rent mechanism."
+      "explanation": "Capacity serves a dual purpose in CKB: it represents the amount of CKBytes (the native token) stored in the cell, AND it defines the maximum number of bytes the cell can occupy on-chain. The conversion is simple: 1 CKByte = 1 byte of on-chain storage. This elegant design creates a natural state rent mechanism that prevents blockchain bloat."
     },
     {
       "id": 3,
       "question": "How does CKB's Cell Model differ from Ethereum's Account Model?",
       "options": [
-        "Cells are stored in a Merkle tree while accounts are not",
-        "Cells are UTXO-like objects owned by lock scripts, while Ethereum uses account-based storage",
-        "There is no difference; they work the same way",
-        "Cells can only store numbers while accounts can store arbitrary data"
+        "CKB cells are stored in a Merkle tree while Ethereum accounts are not",
+        "CKB stores state in individual UTXO-like cells owned by lock scripts, while Ethereum stores state inside account-based contract storage",
+        "There is no meaningful difference; both work the same way under the hood",
+        "CKB cells can only store numbers while Ethereum accounts can store arbitrary data"
       ],
       "correctAnswer": 1,
-      "explanation": "CKB uses a UTXO-like Cell Model where state lives in individual cells owned by lock scripts, while Ethereum uses an Account Model where state is stored in contract accounts. This gives CKB natural parallelism and different composability patterns."
+      "explanation": "CKB uses a generalized UTXO model (the Cell Model) where state lives in individual cells, each owned by a lock script. Ethereum uses an Account Model where state is stored inside contract accounts. This difference gives CKB natural transaction parallelism (cells are independent objects), user ownership of data (data lives in cells users control), and a different composability model (transaction-level rather than contract-call-level)."
     },
     {
       "id": 4,
-      "question": "What is the minimum capacity (in CKBytes) for a cell with no data and no type script?",
+      "question": "What is the minimum capacity needed for a basic CKB cell with no data and no type script?",
       "options": [
         "41 CKBytes",
         "61 CKBytes",
@@ -47,19 +47,55 @@
         "128 CKBytes"
       ],
       "correctAnswer": 1,
-      "explanation": "A minimal cell needs: 8 bytes (capacity) + 32 bytes (lock code_hash) + 1 byte (lock hash_type) + 20 bytes (lock args) = 61 bytes = 61 CKBytes. Each byte of on-chain storage requires 1 CKByte."
+      "explanation": "A minimal CKB cell (with no data and no type script) needs: 8 bytes for the capacity field itself + 32 bytes for the lock script's code_hash + 1 byte for the lock script's hash_type + 20 bytes for typical lock args (a public key hash) = 61 bytes total. Since 1 CKByte = 1 byte of on-chain storage, the minimum capacity is 61 CKBytes (or 6,100,000,000 shannons)."
     },
     {
       "id": 5,
-      "question": "What role does the lock script play in a CKB cell?",
+      "question": "What do Lock Scripts control in CKB?",
       "options": [
-        "It defines the data format stored in the cell",
-        "It determines who can consume (spend) the cell",
-        "It specifies which block the cell was created in",
-        "It calculates the transaction fee"
+        "The data format stored inside the cell",
+        "Who can consume (spend) the cell in a transaction",
+        "Which block the cell was created in",
+        "The transaction fee calculation"
       ],
       "correctAnswer": 1,
-      "explanation": "The lock script determines ownership of a cell — it defines who can spend (consume) the cell in a transaction. The most common lock script verifies a digital signature, but lock scripts can implement any authorization logic."
+      "explanation": "Lock scripts determine ownership of a cell -- they define who can spend (consume) the cell in a transaction. The most common lock script (SECP256K1-BLAKE160) verifies a digital signature against a public key hash stored in the lock's args field. However, lock scripts can implement any authorization logic: multi-signatures, time locks, hash locks, or even Ethereum-compatible signature verification."
+    },
+    {
+      "id": 6,
+      "question": "When are Type Scripts executed during a CKB transaction?",
+      "options": [
+        "Only when cells are created (outputs only)",
+        "Only when cells are consumed (inputs only)",
+        "For both input cells being consumed AND output cells being created",
+        "Type scripts are never actually executed; they are only stored for reference"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Type scripts run for BOTH input and output cells in a transaction. When a cell with a type script is consumed (as an input), the type script validates the destruction. When a cell with a type script is created (as an output), the type script validates the creation. This is different from lock scripts, which only run for input cells. This dual execution allows type scripts to enforce invariants across state transitions -- for example, ensuring that the total supply of a token remains constant."
+    },
+    {
+      "id": 7,
+      "question": "How is data updated in the CKB Cell Model?",
+      "options": [
+        "The cell's data field is modified directly on-chain, like updating a database row",
+        "A special 'update' transaction modifies the cell in place without consuming it",
+        "The old cell is consumed (destroyed) and a new cell is created with updated data",
+        "Data cannot be updated once a cell is created; you must create an entirely new cell with a new lock"
+      ],
+      "correctAnswer": 2,
+      "explanation": "CKB uses a 'consume-and-create' pattern (inherited from the UTXO model). Cells are never modified in place. To update data, a transaction consumes the old cell as an input (destroying it) and creates a new cell as an output with the updated data. The lock script on the old cell verifies the owner authorized the transaction, and any type scripts validate that the state transition is valid. This is fundamentally different from Ethereum, where contract storage is mutated in place."
+    },
+    {
+      "id": 8,
+      "question": "What makes CKB cells 'first-class assets' compared to tokens on other blockchains?",
+      "options": [
+        "CKB cells are faster to transfer than tokens on other chains",
+        "CKB cells can only be created by miners, making them scarce like block rewards",
+        "Users directly own their cells (and the data inside them) via lock scripts, rather than the data being controlled by a smart contract",
+        "CKB cells are automatically backed by real-world assets through an oracle system"
+      ],
+      "correctAnswer": 2,
+      "explanation": "On CKB, cells are 'first-class assets' because users directly own them through their lock scripts. The data inside a cell -- whether it is a token balance, an NFT, or identity information -- belongs to the user, not to a smart contract. On Ethereum, a user's ERC-20 token balance is stored inside the token contract's storage, and the contract controls access to it. On CKB, the token data lives in a cell that the user's lock script controls. This gives users true ownership and custody of their assets and data."
     }
   ]
 }

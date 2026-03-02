@@ -1,0 +1,390 @@
+# Exploring Cells with CCC
+
+## Overview
+
+In this lesson, you will learn how to query, filter, and analyze on-chain cells using the CCC SDK (Common Chains Connector). Cells are the fundamental unit of state in CKB, and understanding how to find and inspect them is essential for building any application on the Nervos network.
+
+By the end of this lesson, you will be able to:
+
+- Search for cells by lock script (owner) and type script (contract)
+- Apply filters for capacity range and data patterns
+- Iterate through results using the CCC cell collector API
+- Distinguish between live and dead cells
+- Classify cells into practical categories (plain CKB, UDT, NFT, etc.)
+
+## Prerequisites
+
+- Completion of Lesson 1 (The Cell Model) and Lesson 4 (Dev Environment Setup)
+- Node.js 18+ installed on your machine
+- Basic familiarity with TypeScript async/await and async generators
+
+## Concepts
+
+### How CKB Indexes Cells
+
+CKB maintains an **indexer** alongside the full node. While the full node stores every block and transaction ever created, the indexer focuses specifically on tracking the current set of **live cells** — cells that exist right now and have not been consumed.
+
+Think of it this way:
+
+- The **full node** is like a complete history book of every event that ever happened.
+- The **indexer** is like a phone directory of everyone currently alive — updated in real time as people are born (cells created) and pass away (cells consumed).
+
+The indexer organizes cells by their scripts, making it possible to quickly answer questions like:
+
+- "What cells does address X own?" (query by lock script)
+- "What cells are governed by smart contract Y?" (query by type script)
+- "What cells match these specific criteria?" (query with filters)
+
+Without the indexer, you would need to scan every block in the entire blockchain to find the cells you are interested in — a process that would take minutes or hours instead of milliseconds.
+
+### Querying by Lock Script vs Type Script
+
+CKB cells have two script fields that serve different purposes, and the indexer lets you query by either one:
+
+**Lock Script Queries** answer the question: "Who owns this cell?"
+
+Every cell must have a lock script. The lock script determines who can spend (consume) the cell. When you query cells by lock script, you are finding all cells owned by a particular address or entity. This is the equivalent of checking a wallet balance.
+
+```typescript
+// Find all cells owned by a specific lock script (address)
+const cells = client.findCellsByLock(lockScript);
+```
+
+**Type Script Queries** answer the question: "What kind of cell is this?"
+
+The type script is optional and defines validation rules for how the cell can be created or updated. When you query cells by type script, you are finding all cells governed by a particular smart contract — regardless of who owns them. This is useful for finding all tokens of a specific type, all NFTs from a collection, or all Nervos DAO deposits.
+
+```typescript
+// Find all cells governed by a specific type script (contract)
+const cells = client.findCellsByType(typeScript);
+```
+
+| Query Type | Script Field | Question Answered | Example Use Case |
+|-----------|-------------|-------------------|-----------------|
+| By Lock | `lock` | Who owns these cells? | Check wallet balance |
+| By Type | `type` | What contract governs these cells? | Find all UDT tokens |
+| Combined | `lock` + `type` filter | Which cells of type Y does address X own? | Check token balance for an address |
+
+### The Cell Collector API in CCC
+
+The CCC SDK provides several methods for finding cells, each suited to different use cases:
+
+**High-Level Methods** (most common):
+
+- `findCellsByLock(lock, type?, withData?, order?, limit?)` — Find cells by lock script with optional type filter
+- `findCellsByType(type, withData?, order?, limit?)` — Find cells by type script
+- `findSingletonCellByType(type)` — Find exactly one cell by type (useful for unique cells)
+
+**Low-Level Method** (full control):
+
+- `findCells(searchKey, order?, limit?)` — Full search with all filter options
+
+**Pagination Method** (for custom pagination):
+
+- `findCellsPaged(searchKey, order?, limit?, cursor?)` — Returns a page of results with a cursor
+
+**Utility Methods**:
+
+- `getBalanceSingle(lock)` — Get total capacity without fetching individual cells
+- `getCellLive(outPoint)` — Check if a specific cell is still live
+
+All methods that return multiple cells use **async generators** (`AsyncGenerator<Cell>`). This means results are streamed lazily — they are fetched from the indexer in batches as you iterate, without loading everything into memory at once.
+
+```typescript
+// Async generators use for-await-of syntax
+for await (const cell of client.findCellsByLock(lockScript)) {
+  console.log("Found cell:", cell.cellOutput.capacity);
+  // You can break early if you have what you need
+  if (someCondition) break;
+}
+```
+
+### Filtering Strategies
+
+The CCC SDK supports several filter options when using the `findCells` method:
+
+**Capacity Range Filter**
+
+Find cells within a specific CKByte value range. Ranges use `[inclusive, exclusive)` semantics.
+
+```typescript
+const cells = client.findCells({
+  script: lockScript,
+  scriptType: "lock",
+  scriptSearchMode: "exact",
+  filter: {
+    // Find cells between 100 and 500 CKB
+    outputCapacityRange: [
+      100n * 100_000_000n,  // 100 CKB (inclusive)
+      500n * 100_000_000n,  // 500 CKB (exclusive)
+    ],
+  },
+  withData: true,
+});
+```
+
+**Data Pattern Filter**
+
+Search for cells whose output data matches a hex pattern:
+
+```typescript
+const cells = client.findCells({
+  script: lockScript,
+  scriptType: "lock",
+  scriptSearchMode: "exact",
+  filter: {
+    outputData: "0x00",           // The pattern to match
+    outputDataSearchMode: "prefix", // "prefix" | "exact" | "partial"
+  },
+  withData: true,
+});
+```
+
+**Script Filter**
+
+Combine lock and type script searches — find cells with a specific lock that also have a particular type script:
+
+```typescript
+const cells = client.findCells({
+  script: lockScript,
+  scriptType: "lock",
+  scriptSearchMode: "exact",
+  filter: {
+    script: typeScript,  // Also match this type script
+  },
+  withData: true,
+});
+```
+
+**Data Length Filter**
+
+Find cells based on the length of their output data:
+
+```typescript
+const cells = client.findCells({
+  script: lockScript,
+  scriptType: "lock",
+  scriptSearchMode: "exact",
+  filter: {
+    outputDataLenRange: [16n, 17n],  // Exactly 16 bytes (common for UDT balances)
+  },
+  withData: true,
+});
+```
+
+### Understanding Live Cells vs Dead Cells
+
+This is one of the most important concepts in CKB's Cell Model:
+
+**Live Cells** are cells that currently exist in the blockchain state. They were created as outputs of a confirmed transaction and have not yet been consumed. The indexer only tracks live cells, and all query methods return live cells.
+
+**Dead Cells** are cells that have been consumed as inputs in a transaction. Once a cell is used as an input, it "dies" — it is removed from the current state and can never be used again. Dead cells still exist in the blockchain history (you can look them up by transaction hash), but they are not returned by indexer queries.
+
+This lifecycle is identical to Bitcoin's UTXO (Unspent Transaction Output) model:
+
+```
+Transaction A creates Cell X  -->  Cell X is LIVE
+                                    (exists in current state, queryable by indexer)
+
+Transaction B consumes Cell X  -->  Cell X is DEAD
+  and creates Cell Y               (removed from state, not queryable)
+                                   Cell Y is LIVE
+```
+
+To check if a specific cell is still live:
+
+```typescript
+const cell = await client.getCellLive(outPoint, true, true);
+if (cell) {
+  console.log("Cell is live!");
+} else {
+  console.log("Cell has been consumed (dead).");
+}
+```
+
+The third parameter (`includeTxPool`) is important: when set to `true`, it also considers transactions in the pending pool that have not yet been confirmed. This helps avoid double-spending by catching cells that are about to be consumed.
+
+### Practical Patterns for Finding Cells
+
+Here are common patterns you will use when building CKB applications:
+
+**Pattern 1: Check Wallet Balance**
+
+```typescript
+const balance = await client.getBalanceSingle(lockScript);
+console.log(`Balance: ${ccc.fixedPointToString(balance)} CKB`);
+```
+
+**Pattern 2: Find Available Cells for a Transaction**
+
+```typescript
+const availableCells: ccc.Cell[] = [];
+let collectedCapacity = 0n;
+const requiredCapacity = 200n * 100_000_000n; // 200 CKB
+
+for await (const cell of client.findCellsByLock(lockScript)) {
+  // Skip cells with type scripts (they may have special rules)
+  if (cell.cellOutput.type) continue;
+
+  availableCells.push(cell);
+  collectedCapacity += cell.cellOutput.capacity;
+
+  // Stop once we have enough capacity
+  if (collectedCapacity >= requiredCapacity) break;
+}
+```
+
+**Pattern 3: Find UDT Token Balance**
+
+```typescript
+let tokenBalance = 0n;
+for await (const cell of client.findCellsByLock(lockScript, udtTypeScript)) {
+  // UDT balance is stored as a 128-bit little-endian integer in the first 16 bytes
+  tokenBalance += ccc.udtBalanceFrom(cell.outputData);
+}
+```
+
+**Pattern 4: Collect Statistics Across Cells**
+
+```typescript
+const stats = { count: 0, total: 0n, withType: 0 };
+for await (const cell of client.findCellsByLock(lockScript)) {
+  stats.count++;
+  stats.total += cell.cellOutput.capacity;
+  if (cell.cellOutput.type) stats.withType++;
+}
+```
+
+## Step-by-Step Tutorial
+
+Follow these steps to build and run the Cell Explorer.
+
+### Step 1: Set Up the Project
+
+```bash
+cd lessons/06-cell-explorer
+npm install
+```
+
+This installs the CCC SDK (`@ckb-ccc/core`), TypeScript, and `tsx` (a TypeScript execution engine).
+
+### Step 2: Connect to the Testnet
+
+The first thing any CKB application does is create a client connection:
+
+```typescript
+import { ccc } from "@ckb-ccc/core";
+
+// Create a client connected to the public testnet
+const client = new ccc.ClientPublicTestnet();
+
+// Verify the connection by fetching the current tip
+const tip = await client.getTip();
+console.log(`Connected! Current block: ${tip}`);
+```
+
+The `ClientPublicTestnet` connects to a public CKB testnet node maintained by the Nervos Foundation. For mainnet applications, you would use `ClientPublicMainnet` or connect to your own node.
+
+### Step 3: Decode an Address into a Lock Script
+
+CKB addresses encode a lock script. To query cells by owner, you decode the address:
+
+```typescript
+const address = await ccc.Address.fromString(
+  "ckt1qzda0cr08m85hc8jlnfp3zer7xulejywt49kt2rr0vthywaa50xwsqfkcv98jy3q3fhn84n7s6r7c0kpqtsx56salqyeg",
+  client
+);
+const lockScript = address.script;
+```
+
+### Step 4: Query Cells by Lock Script
+
+Use the `findCellsByLock` async generator to iterate through cells owned by the address:
+
+```typescript
+for await (const cell of client.findCellsByLock(lockScript, undefined, true, "desc", 10)) {
+  console.log(`Cell: ${cell.outPoint.txHash}:${cell.outPoint.index}`);
+  console.log(`  Capacity: ${cell.cellOutput.capacity} shannons`);
+  console.log(`  Has type: ${!!cell.cellOutput.type}`);
+  console.log(`  Data: ${cell.outputData}`);
+}
+```
+
+### Step 5: Apply Filters
+
+Use the full `findCells` method to add capacity range and data filters:
+
+```typescript
+const filteredCells = client.findCells({
+  script: lockScript,
+  scriptType: "lock",
+  scriptSearchMode: "exact",
+  filter: {
+    outputCapacityRange: [100n * 100_000_000n, 1_000n * 100_000_000n],
+  },
+  withData: true,
+});
+```
+
+### Step 6: Check Cell Liveness
+
+Verify whether a specific cell is still live (not consumed):
+
+```typescript
+const liveCell = await client.getCellLive(
+  { txHash: "0x...", index: 0 },
+  true,  // include data
+  true   // check tx pool
+);
+```
+
+### Step 7: Run the Full Explorer
+
+```bash
+npx tsx src/index.ts
+```
+
+The application walks through all the techniques above with real testnet data, printing formatted output and statistics to your terminal.
+
+## Running the Code
+
+```bash
+cd lessons/06-cell-explorer
+npm install
+npx tsx src/index.ts
+```
+
+The explorer connects to the CKB public testnet and demonstrates:
+
+1. Connecting and verifying the chain tip
+2. Decoding an address to a lock script
+3. Querying cells by lock script with detailed output
+4. Querying Nervos DAO cells by type script
+5. Filtering cells by capacity range
+6. Searching cells by data patterns
+7. Efficient balance queries
+8. Live vs dead cell checks
+9. Manual pagination
+
+## Real-World Examples
+
+- **CKB Explorer**: Browse real cells at [pudge.explorer.nervos.org](https://pudge.explorer.nervos.org) (testnet) or [explorer.nervos.org](https://explorer.nervos.org) (mainnet)
+- **Nervos DAO**: The built-in savings contract uses type script queries to find deposit/withdrawal cells
+- **xUDT Tokens**: Token wallets query cells by both lock script (owner) and type script (token type)
+
+## Summary
+
+Cell querying is the foundation of every CKB application. In this lesson, you learned:
+
+- **The CKB indexer** tracks live cells and allows efficient queries by script
+- **Lock script queries** find cells by owner (like checking a wallet)
+- **Type script queries** find cells by contract (like finding all tokens of a type)
+- **Filters** narrow results at the indexer level (capacity range, data patterns, data length)
+- **Async generators** stream results efficiently without loading everything into memory
+- **Live cells** are in the current state; **dead cells** have been consumed
+- **getCellLive** checks if a specific cell still exists
+- **findCellsPaged** gives manual pagination control for building UIs
+
+## What's Next
+
+In the next lesson, we will explore **CKB Scripts** — the on-chain programs that power lock scripts and type scripts. You will learn how scripts are executed, how they validate transactions, and how to read and understand existing scripts deployed on CKB.

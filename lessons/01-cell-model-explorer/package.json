@@ -1,0 +1,15 @@
+{
+  "name": "01-cell-model-explorer",
+  "version": "1.0.0",
+  "description": "Lesson 1: Explore the CKB Cell Model - query cells and understand their structure",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "npx tsx src/index.ts",
+    "dev": "npx tsx --watch src/index.ts"
+  },
+  "dependencies": {
+    "@ckb-ccc/core": "latest",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

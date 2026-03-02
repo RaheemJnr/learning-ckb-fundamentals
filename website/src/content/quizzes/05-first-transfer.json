@@ -1,0 +1,101 @@
+{
+  "lessonId": 5,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What does the `completeFeeBy(signer)` method do when building a CKB transaction with the CCC SDK?",
+      "options": [
+        "It only calculates the transaction fee",
+        "It selects input cells, adds a change output, and calculates the fee automatically",
+        "It signs the transaction and submits it to the network",
+        "It validates the transaction against the lock scripts"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The completeFeeBy() method performs three critical tasks: it selects enough input cells from the signer's live cells to cover the outputs, adds a change output to return leftover capacity to the sender, and calculates the transaction fee based on the serialized transaction size."
+    },
+    {
+      "id": 2,
+      "question": "How is the transaction fee represented in a CKB transaction?",
+      "options": [
+        "As an explicit 'fee' field in the transaction structure",
+        "As a special fee output cell",
+        "As the difference between total input capacity and total output capacity",
+        "As a value in the transaction header"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Like Bitcoin, CKB transaction fees are implicit. The fee is the difference between the total capacity of all input cells and the total capacity of all output cells. There is no explicit fee field. Miners collect this difference as their reward for including the transaction in a block."
+    },
+    {
+      "id": 3,
+      "question": "What is the correct order of steps when sending a CKB transfer?",
+      "options": [
+        "Sign -> Build -> Submit -> Confirm",
+        "Build outputs -> Complete inputs/fee -> Sign -> Submit",
+        "Submit -> Sign -> Build -> Confirm",
+        "Sign -> Submit -> Build outputs -> Complete fee"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The correct order is: (1) Build the transaction outputs (define what new cells to create), (2) Complete the transaction with inputs and fee using completeFeeBy(), (3) Sign the transaction to authorize spending the inputs, (4) Submit the signed transaction to the network."
+    },
+    {
+      "id": 4,
+      "question": "What does the secp256k1-blake160 lock script verify when a transaction is being confirmed?",
+      "options": [
+        "That the transaction fee is sufficient",
+        "That the output cells have enough capacity",
+        "That the signature in the witness corresponds to the public key hash in the lock args",
+        "That the recipient address is valid"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The secp256k1-blake160 lock script extracts the signature from the witness, recovers the public key from the signature and message hash, computes the blake160 hash of that public key, and compares it to the args field of the lock script. If they match, the input is authorized for spending."
+    },
+    {
+      "id": 5,
+      "question": "What are the three transaction states a submitted CKB transaction goes through before being fully confirmed?",
+      "options": [
+        "created -> validated -> mined",
+        "pending -> proposed -> committed",
+        "submitted -> processing -> confirmed",
+        "mempool -> queued -> finalized"
+      ],
+      "correctAnswer": 1,
+      "explanation": "A CKB transaction goes through three states: 'pending' (in the mempool waiting for a miner), 'proposed' (a miner has proposed it for inclusion in CKB's two-step confirmation process), and 'committed' (included in a confirmed block on the chain)."
+    },
+    {
+      "id": 6,
+      "question": "Why is it dangerous to hardcode private keys in source code?",
+      "options": [
+        "Hardcoded keys make the code run slower",
+        "The compiler will reject the code",
+        "Anyone who can read the source code (via version control, leaks, or shared repos) gains full control of the associated funds",
+        "Private keys can only be stored in hardware wallets"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Hardcoding private keys means that anyone with access to the source code -- through version control history, code leaks, shared repositories, or build artifacts -- can steal all funds controlled by that key. In production, keys should be managed through environment variables, encrypted keystores, or hardware wallets."
+    },
+    {
+      "id": 7,
+      "question": "What is the minimum transfer amount in CKB, and why?",
+      "options": [
+        "1 CKB, because that is the smallest denomination",
+        "61 CKB, because the recipient cell needs at least 61 bytes of capacity to store its own metadata (capacity field + lock script)",
+        "100 CKB, because of network minimum requirements",
+        "0.01 CKB, because shannons allow fractional transfers"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The minimum transfer is 61 CKB because every cell must have enough capacity to cover its own on-chain storage. A minimal cell with just a lock script (no type script or data) requires: 8 bytes (capacity) + 32 bytes (lock code_hash) + 1 byte (lock hash_type) + 20 bytes (lock args) = 61 bytes = 61 CKB."
+    },
+    {
+      "id": 8,
+      "question": "What does `client.sendTransaction(tx)` return, and what does it indicate?",
+      "options": [
+        "It returns a boolean indicating whether the transaction was confirmed",
+        "It returns the transaction hash, which is a unique identifier that can be used to track the transaction, but does NOT mean the transaction is confirmed yet",
+        "It returns the block number where the transaction was included",
+        "It returns the updated account balance after the transfer"
+      ],
+      "correctAnswer": 1,
+      "explanation": "sendTransaction() returns the transaction hash -- a unique identifier computed from the transaction data. This hash serves as a receipt for tracking, but the transaction is NOT yet confirmed at this point. It has only been validated locally and added to the mempool. You must poll getTransaction() to check when it reaches 'committed' status."
+    }
+  ]
+}

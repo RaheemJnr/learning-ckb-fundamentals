@@ -1,0 +1,101 @@
+{
+  "lessonId": 3,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What dual purpose does the CKByte serve on the Nervos CKB network?",
+      "options": [
+        "It is used for governance voting and staking rewards",
+        "It is the native cryptocurrency AND represents 1 byte of on-chain storage",
+        "It pays for gas fees and is burned after each transaction",
+        "It is used as collateral and for cross-chain bridging only"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKByte has a unique dual purpose: it functions as the native cryptocurrency for transfers and fees, and simultaneously represents the right to store 1 byte of data on-chain. This means 100 CKBytes lets you store exactly 100 bytes of data."
+    },
+    {
+      "id": 2,
+      "question": "What is the minimum capacity (in CKBytes) required to create a cell with no data and no type script?",
+      "options": [
+        "8 CKBytes",
+        "53 CKBytes",
+        "61 CKBytes",
+        "100 CKBytes"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The minimum cell requires 61 CKBytes: 8 bytes for the capacity field + 53 bytes for the default SECP256K1-BLAKE160 lock script (32 bytes code_hash + 1 byte hash_type + 20 bytes args). Since 1 CKByte = 1 byte, that totals 61 CKBytes."
+    },
+    {
+      "id": 3,
+      "question": "Which components are included in the capacity calculation formula for a CKB cell?",
+      "options": [
+        "Gas limit + gas price + calldata size",
+        "Capacity field (8 bytes) + lock script size + optional type script size + data size",
+        "Block header + transaction hash + witness data",
+        "Nonce + balance + storage root + code hash"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The capacity formula is: 8 bytes (capacity field) + lock script size (code_hash + hash_type + args) + optional type script size (code_hash + hash_type + args) + data field size. The total in bytes equals the minimum CKBytes required."
+    },
+    {
+      "id": 4,
+      "question": "What is the hard cap of CKB's primary issuance, and what schedule does it follow?",
+      "options": [
+        "Unlimited issuance with a fixed annual rate",
+        "33.6 billion CKBytes with a Bitcoin-like halving every ~4 years",
+        "21 million CKBytes with halving every 210,000 blocks",
+        "100 billion CKBytes released entirely at genesis"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB's primary issuance has a hard cap of 33.6 billion CKBytes with a halving schedule every 8,760 epochs (approximately 4 years), similar to Bitcoin's halving model. This issuance rewards miners for securing the network."
+    },
+    {
+      "id": 5,
+      "question": "How does CKB's secondary issuance function as 'state rent'?",
+      "options": [
+        "Users must pay a monthly fee in CKB to keep their cells alive",
+        "The network charges gas for every read operation on stored data",
+        "A perpetual issuance of 1.344B CKB/year dilutes state occupiers, with their share going to miners",
+        "Validators slash the deposits of users who store data for too long"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Secondary issuance creates 1.344 billion CKBytes per year perpetually. The share attributable to CKBytes locked in cells (occupying state) goes to miners, effectively acting as implicit state rent through dilution. Users occupying state lose purchasing power over time relative to non-state-occupiers."
+    },
+    {
+      "id": 6,
+      "question": "What happens when you deposit CKBytes into the Nervos DAO?",
+      "options": [
+        "Your CKBytes are burned and you receive governance tokens instead",
+        "You receive your proportional share of secondary issuance as compensation, shielding you from inflation",
+        "Your CKBytes are lent to borrowers and you earn interest from loan repayments",
+        "You gain the right to vote on protocol upgrades but receive no financial benefit"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The Nervos DAO redistributes the DAO depositors' proportional share of secondary issuance back to them. This exactly compensates for the inflation from new CKBytes being minted, effectively making DAO depositors immune to dilution from secondary issuance."
+    },
+    {
+      "id": 7,
+      "question": "How does CKB's storage model differ from Ethereum's gas model in handling state?",
+      "options": [
+        "Both models charge a one-time fee; CKB just charges less",
+        "CKB locks tokens for the duration of storage (recoverable when data is removed), while Ethereum charges a one-time gas fee with no cleanup incentive",
+        "Ethereum requires ongoing payments while CKB charges only at creation time",
+        "There is no difference; both use the same economic model for state storage"
+      ],
+      "correctAnswer": 1,
+      "explanation": "On CKB, you lock CKBytes proportional to your storage usage for as long as the data exists on-chain, and recover them when you remove the data. On Ethereum, you pay gas once and the data persists forever with no ongoing cost and no incentive to clean up. CKB's model prevents state bloat by making storage a priced, ongoing resource."
+    },
+    {
+      "id": 8,
+      "question": "How many CKBytes would you need to store a 32-byte hash in a cell with no type script (using the default lock script)?",
+      "options": [
+        "32 CKBytes (just the hash size)",
+        "61 CKBytes (minimum cell capacity)",
+        "93 CKBytes (8 capacity + 53 lock + 32 data)",
+        "128 CKBytes (rounded to nearest power of 2)"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The calculation is: 8 bytes (capacity field) + 53 bytes (default lock script: 32 code_hash + 1 hash_type + 20 args) + 32 bytes (the hash data) = 93 bytes = 93 CKBytes. The cell must have at least 93 CKBytes of capacity to satisfy the size constraint."
+    }
+  ]
+}

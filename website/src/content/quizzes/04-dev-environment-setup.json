@@ -1,0 +1,101 @@
+{
+  "lessonId": 4,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What is the CCC SDK (@ckb-ccc/core) primarily used for?",
+      "options": [
+        "Compiling CKB scripts written in C to RISC-V",
+        "A TypeScript/JavaScript library for connecting to CKB, building transactions, and querying cells",
+        "A graphical user interface for managing CKB wallets",
+        "A consensus engine for running CKB validator nodes"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The CCC (Common Chains Connector) SDK is the recommended TypeScript/JavaScript library for CKB development. It provides RPC clients, transaction builders, cell collectors, and signer abstractions for interacting with the CKB blockchain."
+    },
+    {
+      "id": 2,
+      "question": "What does OffCKB provide for CKB developers?",
+      "options": [
+        "A browser-based IDE for writing smart contracts",
+        "A one-command local CKB devnet with pre-funded accounts and instant blocks",
+        "A cloud-hosted mainnet RPC endpoint",
+        "An automated security auditing tool for CKB scripts"
+      ],
+      "correctAnswer": 1,
+      "explanation": "OffCKB is a CLI tool that spins up a local CKB devnet with a single command ('offckb node'). It provides instant block production, 20 pre-funded accounts, and the ability to reset the chain at any time — ideal for fast development iteration."
+    },
+    {
+      "id": 3,
+      "question": "What are the three CKB networks that developers typically work with?",
+      "options": [
+        "Alpha, Beta, and Gamma",
+        "Mainnet (Lina), Testnet (Pudge/Aggron), and Devnet (local)",
+        "Staging, Production, and Archive",
+        "Primary, Secondary, and Tertiary"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB has three main networks: Mainnet (Lina) for production with real CKBytes, Testnet (Pudge/Aggron) for public testing with faucet CKBytes, and Devnet for local development via OffCKB with instant blocks and pre-funded accounts."
+    },
+    {
+      "id": 4,
+      "question": "How do you get free testnet CKBytes for development?",
+      "options": [
+        "Mine them using a CKB mining rig",
+        "Purchase them on a cryptocurrency exchange",
+        "Request them from the CKB testnet faucet at faucet.nervos.org",
+        "They are automatically credited when you install the CCC SDK"
+      ],
+      "correctAnswer": 2,
+      "explanation": "The CKB testnet faucet at https://faucet.nervos.org/ distributes free testnet CKBytes. You paste your testnet address (starting with 'ckt1...') and the faucet sends test tokens that can be used for development and testing."
+    },
+    {
+      "id": 5,
+      "question": "What address prefix distinguishes a CKB testnet address from a mainnet address?",
+      "options": [
+        "Testnet: 'ckt1', Mainnet: 'ckb1'",
+        "Testnet: 'ckb1', Mainnet: 'ckt1'",
+        "Testnet: '0x', Mainnet: '1x'",
+        "There is no difference — the same address works on both networks"
+      ],
+      "correctAnswer": 0,
+      "explanation": "CKB testnet addresses start with 'ckt1' while mainnet addresses start with 'ckb1'. This prefix distinction prevents accidentally sending real CKBytes to a testnet address or vice versa."
+    },
+    {
+      "id": 6,
+      "question": "What is the minimum Node.js version required for CKB development with the CCC SDK?",
+      "options": [
+        "Node.js 12",
+        "Node.js 14",
+        "Node.js 16",
+        "Node.js 18"
+      ],
+      "correctAnswer": 3,
+      "explanation": "Node.js 18 or higher is required because it includes native support for modern JavaScript features used by the CCC SDK, such as the Web Crypto API and advanced module resolution. Node.js 20 LTS is recommended."
+    },
+    {
+      "id": 7,
+      "question": "When you check a CKB address balance, what are you actually querying?",
+      "options": [
+        "A single balance field stored in the account contract",
+        "The sum of capacity across all live (unspent) cells owned by that address's lock script",
+        "A centralized balance database maintained by Nervos Foundation",
+        "The total gas spent by transactions from that address"
+      ],
+      "correctAnswer": 1,
+      "explanation": "In CKB's Cell Model, an address's 'balance' is the sum of the capacity field across all live (unspent) cells whose lock script matches that address. This is similar to summing UTXOs in Bitcoin — there is no single balance counter."
+    },
+    {
+      "id": 8,
+      "question": "Which command installs OffCKB and which command starts a local devnet?",
+      "options": [
+        "Install: 'brew install offckb', Start: 'offckb start'",
+        "Install: 'npm install -g @offckb/cli', Start: 'offckb node'",
+        "Install: 'pip install offckb', Start: 'offckb run'",
+        "Install: 'cargo install offckb', Start: 'offckb devnet'"
+      ],
+      "correctAnswer": 1,
+      "explanation": "OffCKB is installed via npm as a global package ('npm install -g @offckb/cli') and the local devnet is started with 'offckb node'. You can also use 'offckb accounts' to list pre-funded accounts."
+    }
+  ]
+}

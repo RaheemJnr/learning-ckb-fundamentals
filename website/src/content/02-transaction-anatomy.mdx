@@ -1,0 +1,352 @@
+# Transactions & the UTXO Flow
+
+## Overview
+
+In Lesson 1, you learned that CKB stores all state inside **Cells** -- generalized UTXOs that hold capacity, a lock script, an optional type script, and arbitrary data. But cells on their own are static objects sitting on-chain. The mechanism that brings them to life is the **transaction**.
+
+A CKB transaction is the **only** way to change state on the blockchain. It does this through a simple but powerful pattern called **consume-and-create**:
+
+- **Consume** (destroy) a set of existing cells (the inputs).
+- **Create** a set of new cells (the outputs).
+
+There is no "update in place" like in Ethereum's account model. If you want to change a cell's data or transfer CKBytes to someone, you must consume the old cell and create new ones with the desired state.
+
+This model is inherited from Bitcoin's UTXO (Unspent Transaction Output) design, but CKB extends it significantly with richer cell contents, cell dependencies for on-chain code references, and a flexible witness structure for proofs and signatures.
+
+### CKB vs. Ethereum Transactions
+
+| Aspect | CKB Transaction | Ethereum Transaction |
+|--------|----------------|---------------------|
+| State change | Consume old cells, create new cells | Modify account storage in place |
+| Fee model | `sum(inputs) - sum(outputs)` | `gas_used * gas_price` |
+| Parallelism | Naturally parallel (different cells) | Sequential (nonce-based) |
+| Signatures | In witnesses array | Part of the transaction envelope |
+| Code references | Via cell_deps (on-chain cells) | Contract addresses called directly |
+| Validation | Off-chain compute, on-chain verify | On-chain compute and verify |
+
+## Prerequisites
+
+- Completed Lesson 1: What is CKB? The Cell Model
+- Understanding of what cells are and their four fields (capacity, lock, type, data)
+- Node.js 18+ and basic TypeScript knowledge
+
+## Key Concepts
+
+### Transaction Structure
+
+A CKB transaction contains six arrays that together define a complete state transition:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                    CKB Transaction                       │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│  cell_deps[]      References to on-chain code cells      │
+│                   that scripts need to execute            │
+│                                                          │
+│  header_deps[]    References to block headers that        │
+│                   scripts may need to read                │
+│                                                          │
+│  inputs[]         Existing cells to consume (destroy)     │
+│                   Each is an OutPoint + since value        │
+│                                                          │
+│  outputs[]        New cells to create                     │
+│                   Each has capacity, lock, type            │
+│                                                          │
+│  outputs_data[]   Data for each output cell               │
+│                   Parallel array: outputs_data[i]         │
+│                   belongs to outputs[i]                    │
+│                                                          │
+│  witnesses[]      Proofs and signatures                   │
+│                   Loosely parallel to inputs               │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+
+Let's examine each field in detail.
+
+### The Input-Output Flow
+
+The heart of every CKB transaction is the flow from inputs to outputs:
+
+```
+  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+  │  Input Cell A │     │  Input Cell B │     │  Input Cell C │
+  │  200 CKB      │     │  150 CKB      │     │  100 CKB      │
+  │  (consumed)   │     │  (consumed)   │     │  (consumed)   │
+  └──────┬───────┘     └──────┬───────┘     └──────┬───────┘
+         │                    │                    │
+         └────────────────────┼────────────────────┘
+                              │
+                              ▼
+                    ┌─────────────────┐
+                    │   Transaction   │
+                    │                 │
+                    │ Total in: 450   │
+                    └────────┬────────┘
+                             │
+              ┌──────────────┼──────────────┐
+              │              │              │
+              ▼              ▼              ▼
+  ┌──────────────┐  ┌──────────────┐  ┌─────────────┐
+  │ Output Cell 1 │  │ Output Cell 2 │  │   Fee       │
+  │ 300 CKB       │  │ 149.999 CKB   │  │ 0.001 CKB   │
+  │ (to recipient)│  │ (change back) │  │ (to miner)  │
+  └──────────────┘  └──────────────┘  └─────────────┘
+```
+
+Key rules:
+- **Input cells are destroyed.** Once consumed, they become "dead cells" and can never be used again.
+- **Output cells are created.** They become new "live cells" on-chain.
+- **Capacity must balance.** Total input capacity must be greater than or equal to total output capacity. The difference is the miner fee.
+- **No partial consumption.** You cannot consume "part" of a cell. If you only need 100 CKB from a 500 CKB cell, you consume the whole cell and create a "change" output returning 400 CKB to yourself (minus the fee).
+
+Each **input** is an **OutPoint** -- a reference to a specific cell by its creating transaction hash and output index:
+
+```typescript
+interface Input {
+  previousOutput: {
+    txHash: string;   // Hash of the tx that created this cell
+    index: number;    // Index in that tx's outputs array
+  };
+  since: bigint;      // Time-lock constraint (0 = no restriction)
+}
+```
+
+Each **output** defines a brand new cell:
+
+```typescript
+interface Output {
+  capacity: bigint;    // CKBytes in shannons (1 CKB = 10^8 shannons)
+  lock: Script;        // Ownership: who can consume this cell
+  type: Script | null; // Validation rules (optional)
+}
+// outputs_data[i] holds the data bytes for outputs[i]
+```
+
+### Cell Dependencies
+
+When a transaction is validated, the CKB-VM needs to execute the lock and type scripts referenced by the inputs and outputs. But cells only store the **hash** of their script code (`code_hash`), not the code itself. So where does the actual executable binary live?
+
+In another cell on-chain! **Cell dependencies** (`cell_deps`) tell the validator which cells contain the script binaries:
+
+```typescript
+interface CellDep {
+  outPoint: {
+    txHash: string;  // Transaction that created the code cell
+    index: number;   // Index in that tx's outputs
+  };
+  depType: "code" | "depGroup";
+}
+```
+
+There are two dep types:
+- **`code`**: The referenced cell's data field contains the script binary directly.
+- **`depGroup`**: The referenced cell's data contains a *list* of OutPoints, each pointing to a code cell. This is a convenience for bundling multiple dependencies.
+
+**Why this design?** Separating code from references has powerful benefits:
+1. **Code reuse**: Many cells can reference the same script code cell.
+2. **Upgradeability**: You can deploy a new code cell and have new transactions reference it, without changing existing cells.
+3. **Efficiency**: The script binary is stored once on-chain, not duplicated in every cell.
+
+### Witnesses & Signatures
+
+The **witnesses** array carries proof data -- most commonly, cryptographic signatures that prove the transaction was authorized by the cell owners.
+
+```
+  witnesses[]  loosely parallels  inputs[]
+
+  witnesses[0]  ←→  signature for inputs[0]'s lock script
+  witnesses[1]  ←→  signature for inputs[1]'s lock script
+  witnesses[2]  ←→  (may be extra data for type scripts)
+```
+
+A critical design detail: **witnesses are NOT included in the transaction hash** (`tx_hash`). The `tx_hash` is computed from everything else -- inputs, outputs, cell_deps, header_deps, and outputs_data. This avoids a circular dependency:
+
+1. Build the raw transaction (without witnesses).
+2. Compute the `tx_hash`.
+3. Sign the `tx_hash` to produce the signature.
+4. Place the signature into `witnesses[0]`.
+5. Submit the complete transaction.
+
+The first witness in each "script group" (all inputs sharing the same lock script) uses a structured format called **WitnessArgs**:
+
+```typescript
+interface WitnessArgs {
+  lock: Uint8Array | null;        // Signature for the lock script
+  inputType: Uint8Array | null;   // Data for input type scripts
+  outputType: Uint8Array | null;  // Data for output type scripts
+}
+```
+
+### Transaction Fees
+
+CKB has no concept of "gas." The transaction fee is determined purely by the capacity difference:
+
+```
+fee = sum(input capacities) - sum(output capacities)
+```
+
+This is identical to how Bitcoin transaction fees work. There is no gas limit, gas price, or EIP-1559 base fee. The fee is simply the CKBytes that are consumed but not re-created in any output.
+
+**Fee estimation guidelines:**
+- A typical simple transfer costs around **0.001 CKB** (100,000 shannons).
+- Fees are based on the transaction's serialized byte size (miners prefer higher fee-per-byte transactions).
+- The minimum fee rate on mainnet is typically **1,000 shannons per byte** of transaction size.
+
+### Transaction Lifecycle
+
+A CKB transaction goes through six stages from creation to finality:
+
+```
+  ┌────────────┐    ┌──────────┐    ┌────────────┐
+  │ 1. Construct│ -> │ 2. Sign  │ -> │ 3. Submit  │
+  │   (off-chain)│    │(off-chain)│    │  (to node) │
+  └────────────┘    └──────────┘    └────────────┘
+                                          │
+                                          ▼
+  ┌────────────┐    ┌──────────┐    ┌────────────┐
+  │ 6. Committed│ <- │5. Proposed│ <- │ 4. Pending │
+  │  (finalized)│    │ (in block)│    │  (mempool) │
+  └────────────┘    └──────────┘    └────────────┘
+```
+
+1. **Construction**: The sender selects input cells, defines output cells, and adds cell deps. All done off-chain.
+2. **Signing**: The sender computes the tx_hash and signs it. The signature goes into the witnesses array.
+3. **Submission**: The signed transaction is sent to a CKB node via the `send_transaction` RPC. The node performs preliminary validation.
+4. **Pending**: The transaction sits in the node's mempool (transaction pool), waiting to be picked up by a miner.
+5. **Proposed**: A miner includes the transaction in a block's "proposal zone." CKB uses a two-step confirmation process (NC-Max consensus) where transactions are first proposed, then committed.
+6. **Committed**: The transaction is included in a block's "commitment zone." The input cells are now dead; the output cells are now live. The state transition is complete.
+
+## Step-by-Step Tutorial
+
+In this lesson's project, we build a CLI tool that fetches real transactions from the CKB testnet and displays their complete anatomy.
+
+### Step 1: Set up the project
+
+```bash
+cd lessons/02-transaction-anatomy
+npm install
+```
+
+This installs the CCC library (`@ckb-ccc/core`) which provides a typed interface to CKB's JSON-RPC API.
+
+### Step 2: Connect to testnet
+
+```typescript
+import { ccc } from "@ckb-ccc/core";
+
+// Connect to the CKB public testnet ("Pudge")
+const client = new ccc.ClientPublicTestnet();
+
+// Get the latest block number
+const tipHeader = await client.getTipHeader();
+console.log(`Current tip block: #${Number(tipHeader.number)}`);
+```
+
+The `ClientPublicTestnet` connects to a public CKB testnet node. No API keys or configuration needed.
+
+### Step 3: Fetch a block and find transactions
+
+```typescript
+// Fetch a block by number
+const block = await client.getBlockByNumber(blockNumber);
+
+// block.transactions[0] is always the cellbase (coinbase) transaction
+// User transactions start at index 1
+for (let i = 1; i < block.transactions.length; i++) {
+  const tx = block.transactions[i];
+  const txHash = tx.hash();
+  console.log(`Transaction: ${txHash}`);
+}
+```
+
+Every block has at least one transaction -- the cellbase transaction that rewards the miner. User transactions follow at index 1 and beyond.
+
+### Step 4: Inspect transaction inputs
+
+```typescript
+for (const input of tx.inputs) {
+  // Each input references an existing cell via OutPoint
+  console.log(`OutPoint: ${input.previousOutput.txHash}:${input.previousOutput.index}`);
+  console.log(`Since: ${input.since}`);
+
+  // To see the actual cell, fetch the transaction that created it
+  const prevTx = await client.getTransaction(input.previousOutput.txHash);
+  const cell = prevTx.transaction.outputs[Number(input.previousOutput.index)];
+  console.log(`Capacity: ${cell.capacity} shannons`);
+}
+```
+
+### Step 5: Inspect transaction outputs
+
+```typescript
+for (let i = 0; i < tx.outputs.length; i++) {
+  const output = tx.outputs[i];
+  const data = tx.outputsData[i];
+
+  console.log(`Output ${i}:`);
+  console.log(`  Capacity: ${output.capacity} shannons`);
+  console.log(`  Lock: ${output.lock.codeHash}`);
+  console.log(`  Type: ${output.type ? output.type.codeHash : "none"}`);
+  console.log(`  Data: ${data === "0x" ? "(empty)" : data}`);
+}
+```
+
+### Step 6: Calculate the fee
+
+```typescript
+// Sum all input capacities
+let totalInputs = 0n;
+for (const input of tx.inputs) {
+  const prevTx = await client.getTransaction(input.previousOutput.txHash);
+  const idx = Number(input.previousOutput.index);
+  totalInputs += prevTx.transaction.outputs[idx].capacity;
+}
+
+// Sum all output capacities
+let totalOutputs = 0n;
+for (const output of tx.outputs) {
+  totalOutputs += output.capacity;
+}
+
+const fee = totalInputs - totalOutputs;
+console.log(`Fee: ${fee} shannons (${Number(fee) / 1e8} CKB)`);
+```
+
+### Step 7: Run the explorer
+
+```bash
+npm start
+```
+
+The script will connect to testnet, scan recent blocks, and display the anatomy of up to 3 transactions, including a visual UTXO flow diagram for each.
+
+## Running the Code
+
+The complete project code is in the `lessons/02-transaction-anatomy` directory. To run it:
+
+```bash
+cd lessons/02-transaction-anatomy
+npm install
+npm start
+```
+
+## Real-World Examples
+
+- **CKB Explorer**: Browse real transactions at [explorer.nervos.org](https://explorer.nervos.org) -- click any transaction to see its inputs, outputs, and cell deps
+- **Bitcoin comparison**: CKB transactions are structurally similar to Bitcoin transactions but with the addition of type scripts, cell deps, and richer data fields
+- **Nervos DAO**: A real-world example of header_deps usage -- DAO withdrawal transactions reference the deposit block header to calculate interest
+
+## Summary & What's Next
+
+In this lesson you learned:
+
+- **Transaction structure**: The six arrays (cell_deps, header_deps, inputs, outputs, outputs_data, witnesses) that make up every CKB transaction.
+- **Consume-and-create model**: Input cells are destroyed, output cells are created. There is no in-place mutation.
+- **Cell dependencies**: How scripts find their executable code via on-chain cell references.
+- **Witnesses**: How signatures are stored separately from the transaction hash to avoid circular dependencies.
+- **Fee calculation**: The simple formula `fee = sum(inputs) - sum(outputs)`.
+- **Transaction lifecycle**: From off-chain construction through signing, submission, and the two-step propose-then-commit consensus.
+
+In the next lesson, we'll dive deeper into **capacity calculations** -- understanding how CKB's state rent mechanism works, how to calculate the minimum capacity for different cell types, and how this elegant design prevents blockchain state bloat.
