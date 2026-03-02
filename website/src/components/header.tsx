@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { Menu, X, BookOpen, Wallet } from "lucide-react";
+import { Menu, X, BookOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { WalletConnect } from "@/components/wallet-connect";
 import {
   Sheet,
   SheetContent,
@@ -48,10 +49,7 @@ export function Header() {
         {/* Desktop Actions */}
         <div className="hidden items-center gap-2 md:flex">
           <ThemeToggle />
-          <Button size="sm" className="gap-2">
-            <Wallet className="size-4" />
-            Connect Wallet
-          </Button>
+          <WalletConnect />
         </div>
 
         {/* Mobile Menu */}
@@ -77,10 +75,7 @@ export function Header() {
                   </Link>
                 ))}
                 <div className="mt-4 border-t pt-4">
-                  <Button className="w-full gap-2" size="sm">
-                    <Wallet className="size-4" />
-                    Connect Wallet
-                  </Button>
+                  <WalletConnect className="w-full" />
                 </div>
               </nav>
             </SheetContent>
