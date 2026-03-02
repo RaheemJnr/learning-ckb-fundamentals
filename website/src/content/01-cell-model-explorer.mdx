@@ -1,0 +1,160 @@
+---
+title: "What is CKB? The Cell Model"
+---
+
+# What is CKB? The Cell Model
+
+## Overview
+
+In this lesson, you'll learn about the fundamental building blocks of the Nervos CKB blockchain. CKB (Common Knowledge Base) uses a unique **Cell Model** that generalizes Bitcoin's UTXO model, enabling powerful smart contract capabilities while maintaining the security and simplicity of the UTXO paradigm.
+
+## Prerequisites
+
+- Basic understanding of blockchain concepts (blocks, transactions, consensus)
+- Node.js installed on your machine
+- Familiarity with JavaScript/TypeScript
+
+## Concepts
+
+### What is Nervos CKB?
+
+Nervos CKB (Common Knowledge Base) is a Layer 1 Proof-of-Work blockchain designed as the foundation of the Nervos Network. It serves as a trustless custody and verification layer, storing the most important shared knowledge (state) of the network.
+
+Key features:
+- **Proof-of-Work consensus** using the Eaglesong hash function
+- **Cell Model** for flexible state management
+- **RISC-V virtual machine** (CKB-VM) for script execution
+- **Economic model** that aligns incentives for long-term sustainability
+
+### The Cell Model
+
+A **Cell** is the basic unit of state in CKB. Think of it as a box that can hold data and is protected by scripts. Every cell has four fields:
+
+```typescript
+interface Cell {
+  capacity: bigint;      // Size limit in bytes (also the CKByte value)
+  lock: Script;          // Who owns this cell (like a lock on a safe)
+  type: Script | null;   // Rules for how the cell can be used
+  data: Uint8Array;      // Arbitrary data stored in the cell
+}
+```
+
+#### Capacity
+
+Capacity serves a dual purpose:
+1. It represents the amount of **CKBytes** (the native token) stored in the cell
+2. It defines the **maximum size** the cell can occupy on-chain (in bytes)
+
+This means storing data on CKB requires holding CKBytes proportional to the data size — a form of **state rent** that prevents blockchain bloat.
+
+#### Lock Script
+
+The lock script determines **who can spend** (consume) the cell. It's like a padlock: only someone with the right key can open it. The most common lock script checks a digital signature.
+
+#### Type Script
+
+The type script is optional and defines **validation rules** for how the cell can be created, updated, or destroyed. Think of it like a contract that must be satisfied.
+
+#### Data
+
+The data field stores arbitrary bytes. It can hold anything: token balances, NFT content, serialized data structures, or even compiled programs.
+
+### Cells vs Accounts
+
+| Feature | CKB Cells | Ethereum Accounts |
+|---------|-----------|-------------------|
+| State location | In cells (UTXO-like) | In account storage |
+| Ownership | Lock script | Private key |
+| Concurrency | Naturally parallel | Sequential nonce |
+| Composability | Transaction-level | Contract calls |
+
+## Step-by-Step Tutorial
+
+In this lesson's project, we'll build a Cell Model Explorer that lets you inspect cells on the CKB testnet.
+
+### Step 1: Initialize the project
+
+```bash
+mkdir 01-cell-model-explorer
+cd 01-cell-model-explorer
+npm init -y
+npm install @ckb-ccc/core
+```
+
+### Step 2: Query live cells
+
+```typescript
+import { ccc } from "@ckb-ccc/core";
+
+// Connect to CKB testnet
+const client = new ccc.ClientPublicTestnet();
+
+async function exploreCells() {
+  // Query cells by lock script
+  const lockScript = ccc.Script.from({
+    codeHash: "0x9bd7e06f3ecf4be0f2fcd2188b23f1b9fcc88e5d4b65a8637b17723bbda3cce8",
+    hashType: "type",
+    args: "0x..." // your lock args here
+  });
+
+  console.log("Searching for cells...");
+
+  for await (const cell of client.findCellsByLock(lockScript)) {
+    console.log("Cell found:");
+    console.log("  Capacity:", cell.cellOutput.capacity.toString(), "shannons");
+    console.log("  Data length:", cell.outputData.length, "bytes");
+    console.log("  Type script:", cell.cellOutput.type ? "present" : "none");
+  }
+}
+
+exploreCells();
+```
+
+### Step 3: Calculate cell capacity
+
+```typescript
+function calculateMinCapacity(
+  dataLength: number,
+  hasTypeScript: boolean
+): bigint {
+  // Base: 8 (capacity) + 32 (lock code_hash) + 1 (lock hash_type) + 20 (lock args)
+  let bytes = 8 + 32 + 1 + 20;
+
+  // Type script: 32 (code_hash) + 1 (hash_type) + 20 (args, typical)
+  if (hasTypeScript) {
+    bytes += 32 + 1 + 20;
+  }
+
+  // Data field
+  bytes += dataLength;
+
+  // 1 CKByte = 1 byte of on-chain storage = 10^8 shannons
+  return BigInt(bytes) * 100_000_000n;
+}
+
+console.log(
+  "Min capacity for empty cell:",
+  calculateMinCapacity(0, false).toString(),
+  "shannons"
+);
+// Output: 6100000000 shannons = 61 CKBytes
+```
+
+## Running the Code
+
+The complete project code is in the `lessons/01-cell-model-explorer` directory. To run it:
+
+```bash
+cd lessons/01-cell-model-explorer
+npm install
+npx ts-node src/index.ts
+```
+
+## Real-World Examples
+
+- **CKB Explorer**: Browse real cells at [explorer.nervos.org](https://explorer.nervos.org)
+- **Bitcoin UTXO Model**: CKB cells generalize Bitcoin UTXOs by adding data and type script fields
+
+## What's Next
+
+In the next lesson, we'll explore how **transactions** work in CKB — how cells are consumed and created to form state transitions.

@@ -1,0 +1,65 @@
+{
+  "lessonId": 1,
+  "questions": [
+    {
+      "id": 1,
+      "question": "What are the four fields of a CKB Cell?",
+      "options": [
+        "address, balance, nonce, storage",
+        "capacity, lock, type, data",
+        "input, output, witness, header",
+        "hash, index, since, args"
+      ],
+      "correctAnswer": 1,
+      "explanation": "Every CKB cell has four fields: capacity (storage size and CKByte value), lock (ownership script), type (optional validation script), and data (arbitrary bytes)."
+    },
+    {
+      "id": 2,
+      "question": "What dual purpose does the 'capacity' field serve in a CKB cell?",
+      "options": [
+        "It stores the gas limit and gas price",
+        "It defines the block number and timestamp",
+        "It represents both the CKByte value and the maximum cell size in bytes",
+        "It specifies the lock script hash and type script hash"
+      ],
+      "correctAnswer": 2,
+      "explanation": "Capacity has a dual purpose: it represents the amount of CKBytes stored in the cell AND defines the maximum number of bytes the cell can occupy on-chain. This creates an elegant state rent mechanism."
+    },
+    {
+      "id": 3,
+      "question": "How does CKB's Cell Model differ from Ethereum's Account Model?",
+      "options": [
+        "Cells are stored in a Merkle tree while accounts are not",
+        "Cells are UTXO-like objects owned by lock scripts, while Ethereum uses account-based storage",
+        "There is no difference; they work the same way",
+        "Cells can only store numbers while accounts can store arbitrary data"
+      ],
+      "correctAnswer": 1,
+      "explanation": "CKB uses a UTXO-like Cell Model where state lives in individual cells owned by lock scripts, while Ethereum uses an Account Model where state is stored in contract accounts. This gives CKB natural parallelism and different composability patterns."
+    },
+    {
+      "id": 4,
+      "question": "What is the minimum capacity (in CKBytes) for a cell with no data and no type script?",
+      "options": [
+        "41 CKBytes",
+        "61 CKBytes",
+        "100 CKBytes",
+        "128 CKBytes"
+      ],
+      "correctAnswer": 1,
+      "explanation": "A minimal cell needs: 8 bytes (capacity) + 32 bytes (lock code_hash) + 1 byte (lock hash_type) + 20 bytes (lock args) = 61 bytes = 61 CKBytes. Each byte of on-chain storage requires 1 CKByte."
+    },
+    {
+      "id": 5,
+      "question": "What role does the lock script play in a CKB cell?",
+      "options": [
+        "It defines the data format stored in the cell",
+        "It determines who can consume (spend) the cell",
+        "It specifies which block the cell was created in",
+        "It calculates the transaction fee"
+      ],
+      "correctAnswer": 1,
+      "explanation": "The lock script determines ownership of a cell — it defines who can spend (consume) the cell in a transaction. The most common lock script verifies a digital signature, but lock scripts can implement any authorization logic."
+    }
+  ]
+}
