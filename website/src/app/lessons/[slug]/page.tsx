@@ -11,6 +11,7 @@ import {
   Clock,
   ExternalLink,
   FileQuestion,
+  Code2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -183,9 +184,24 @@ export default async function LessonPage({
         </p>
       </header>
 
-      {/* Progress controls (client component - only shows when wallet connected) */}
-      <div className="mb-6">
+      {/* StackBlitz + Progress controls */}
+      <div className="mb-6 flex flex-wrap items-center gap-3">
         <LessonProgressControls lessonId={lesson.id} />
+        <a
+          href={`https://stackblitz.com/github/RaheemJnr/learning-ckb-fundamentals/tree/main/lessons/${lesson.slug}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-2 rounded-md border border-border bg-background px-3 py-1.5 text-sm font-medium text-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+        >
+          <Code2 className="size-4 text-blue-500" />
+          Open in StackBlitz
+          <ExternalLink className="size-3 text-muted-foreground" />
+        </a>
+        {lesson.phase === 2 && lesson.id >= 8 && lesson.id <= 12 && (
+          <span className="text-xs text-muted-foreground">
+            (TypeScript parts only — Rust contracts require local setup)
+          </span>
+        )}
       </div>
 
       {/* MDX Content */}
