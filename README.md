@@ -2,7 +2,7 @@
 
 A comprehensive 24-lesson incremental learning platform for Nervos CKB blockchain development. Master the Cell Model, write custom scripts in Rust, deploy tokens and NFTs, and build real dApps — all through hands-on, interactive lessons.
 
-**Live Platform:** [https://website-sooty-chi-72.vercel.app](https://website-sooty-chi-72.vercel.app)
+**Live Platform:** [https://pocket-node-learn-ckb.vercel.app](https://pocket-node-learn-ckb.vercel.app)
 
 **GitHub:** [https://github.com/RaheemJnr/learning-ckb-fundamentals](https://github.com/RaheemJnr/learning-ckb-fundamentals)
 
